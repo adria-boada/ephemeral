@@ -112,8 +112,9 @@ def func_optim(args):
         i = int(args.manual_exec_i)
         running = range(i, i + 1)
 
-    # Read SFS file.
-    sfs = func_create_sfs(args)["sfs"]
+    # Import sfs file as a 'moments.Spectrum' object.
+    sfs = moments.Spectrum.fromfile(args.sfs_input, mask_corners=False)
+
     # Make sure that the given SFS ends up being bidimensional;
     # first, at least a pair of pops are required.
     if len(sfs.pop_ids) < 2:
@@ -126,25 +127,17 @@ def func_optim(args):
         if not args.pop_lab:
             raise Exception(
                 "Please provide a pair of pop. labels through"
-                + " '--pop_lab' in order to isolate these and create a"
+                + " '--pop-lab' in order to isolate these and create a"
                 + " bidimensional SFS from a multidimensional SFS.")
         if len(args.pop_lab) != 2:
             raise Exception(
                 "Population data (positional parameter) includes more"
                 + " than 2 populations. However, a pair of pop. labels"
                 + " should be provided to marginalize these and create"
-                + " a bidimensional SFS (see '--pop_lab' within '--help').")
-        # Marginalize a pair of pops with the user-given pop labels.
-        # `moments` cannot marginalize based on `pop_ids`; must translate
-        # labels (str) to "list" indice (int) for slicing.
-        margin_pop_indice = [sfs.pop_ids.index(label)
-                             for label in sfs.pop_ids
-                             if label not in args.pop_lab]
-        # Marginalize (remove) population data we are not interested in.
-        # Keep population data labelled as in "args.pop_lab".
-        sfs = sfs.marginalize(margin_pop_indice)
-        print("INFO: More than a pair of population data was included."
-              + f" Keeping {args.pop_lab} while removing the rest.")
+                + " a bidimensional SFS (see '--pop-lab' within '--help').")
+
+        print("INFO: More than a pair of population data was included.")
+        sfs = marginalize_sfs(sfs, args.pop_lab)
 
     # If an outfile prefix was not given through CLI, obtain it from a
     # combination of population IDs.
@@ -179,7 +172,7 @@ def func_optim(args):
 
     return None
 
-def print_summary(args, sfs):
+def print_summary(args, sfs: moments.Spectrum):
     """
     Print useful info about the AFS or join-site FS.
     """
@@ -204,10 +197,10 @@ def print_summary(args, sfs):
     print("\n# Overview of algor. params.")
     print("============================")
     print("· User-specified steps of the optimization algorithm, " +
-          "per round ('--max_iters'): " +
+          "per round ('--max-iters'): " +
           str(args.max_iters))
     print("· User-specified perturbation of the starting parameters, " +
-          "per round ('--fold_algor'): " +
+          "per round ('--fold-algor'): " +
           str(args.fold_algor))
     if args.independent_runs:
         print("· Performing {} independent runs.".format(
@@ -216,6 +209,40 @@ def print_summary(args, sfs):
         print("· Performing a single run with ID/number " +
               "'{}'.".format(args.manual_exec_i))
     print("· Using the output file prefix '{}'".format(args.out_prefix))
+
+    return None
+
+def marginalize_sfs(sfs: moments.Spectrum, pop_lab: list):
+    """
+    Marginalize some pops. with the user-given pop labels.
+    """
+
+    # `moments` cannot marginalize based on `pop_ids`; must translate
+    # labels (str) to "list" indice (int) for slicing.
+    pop_indice_to_remove = [
+        sfs.pop_ids.index(label) for label in sfs.pop_ids
+        if label not in pop_lab]
+    # Marginalize (remove) population data we are not interested in.
+    # Keep population data with the labels found in "pop_lab".
+    print(f"INFO: Keeping {pop_lab} while removing the rest.")
+    sfs = sfs.marginalize(pop_indice_to_remove)
+
+    return sfs
+
+def func_margin(args):
+    """
+    Wrapper which uses 'marginalize_sfs' to marginalize and then writes to
+    file.
+    """
+
+    # Import sfs file as a 'moments.Spectrum' object.
+    sfs = moments.Spectrum.fromfile(args.sfs_input, mask_corners=False)
+
+    sfs = marginalize_sfs(sfs, args.pop_lab)
+    print("INFO: Writing to 'output.marginalized.sfs'.")
+    with open("output.marginalized.sfs", "x") as fout:
+        pass
+    sfs.to_file("output.marginalized.sfs")
 
     return None
 
@@ -259,6 +286,25 @@ if __name__ == '__main__':
 #>        + " SFS will be unpolarized (folded)."
 #>        + " DO NOT USE, NOT IMPLEMENTED WELL.")
 
+    # "MARGIN" SUBCOMMAND
+    # -------------------
+    parser_margin = subparsers.add_parser(
+        "margin", # subcommand name.
+        description="Marginalize (filter out) populations from a"
+        + " multidimensional SFS (reducing dimensionality).",
+        help="Marginalize (filter out) populations from a"
+        + " multidimensional SFS (reducing dimensionality).", )
+    parser_margin.set_defaults(func=func_margin)
+    # SFS file which will be imported with 'moments' to be filtered.
+    parser_margin.add_argument(
+        "sfs_input", type=str, metavar="SFS",
+        help="'Site Frequency Spectrum' obtained from the other"
+        + " subcommand 'toSFS'.")
+    parser_margin.add_argument(
+        "--pop-lab", required=True, nargs="+", metavar="ID", type=str,
+        help="Population labels (matching those provided within the SFS)"
+        + " which will be isolated to a new SFS of reduced dimensionality.")
+
     # "OPTIM" SUBCOMMAND
     # ------------------
     parser_optim = subparsers.add_parser(
@@ -268,44 +314,41 @@ if __name__ == '__main__':
         help="Optimize population variables to fit an observed"
         + " bidimensional SFS.", )
     parser_optim.set_defaults(func=func_optim)
-    # Files with polymorphism calling data from which an SFS will be created.
+    # SFS file which will be imported with 'moments' to be filtered.
     parser_optim.add_argument(
-        "data_input", type=str, nargs="+", metavar="LABEL=NCHR=FILE",
-        help="Label of the population, number of chromosomes,"
-        + " and file-name, separated by equal characters. Add as many"
-        + " population data as required (will output multidim. SFS)."
-        + " Make sure to provide at least 2 data files."
-        + " Moreover, if more than 2 files are provided, it will"
-        + " be required to marginalize and leave only a pair"
-        + " (through '--pop_lab').")
+        "sfs_input", type=str, metavar="SFS",
+        help="'Site Frequency Spectrum' obtained from the other"
+        + " subcommand 'toSFS'. If it is above 2D (multidimensional),"
+        + " then it is required to marginalize, leaving only 2 pops"
+        + " (through specifying '--pop-lab').")
     parser_optim.add_argument(
-        "--fit_models", required=True, nargs="+",
+        "--fit-models", required=True, nargs="+",
         choices=list(predef.models.keys()), metavar="MODEL",
         help="The name of the model(s) desired to be fit."
-        + " Run with '--fit_models h' to display available models."
-        + " Lower and upper bounds for optimization can be tweaked "
+        + " Run with '--fit-models h' to display available models."
+        + " Lower and upper bounds for optimization can be tweaked"
         + " within the submodule 'predefined_models.py'.")
     parser_optim.add_argument(
         "--rounds", required=True, type=int,
         help="Amount of rounds of optimization.")
     parser_optim.add_argument(
         "--replicates", required=True, nargs="+", type=int,
-        help="Replicates for each round; must be a list of ints "
-        + "of length 'ROUNDS'.")
+        help="Replicates for each round; must be a list of ints"
+        + " of length 'ROUNDS'.")
 
     execucions = parser_optim.add_mutually_exclusive_group(required=True)
     execucions.add_argument(
-        "--independent_runs", type=int, metavar="INT",
+        "--independent-runs", type=int, metavar="INT",
         help="The number of independent runs of optimization performed.")
     execucions.add_argument(
-        "--manual_exec_i", type=int, metavar="INT",
+        "--manual-exec-i", type=int, metavar="INT",
         help="If the independent runs are performed manually or on behalf"
         + " of other software, use this option for the"
         + " output files to be labeled accordingly.")
 
     # Optionally, marginalize data to obtain only a pair of pops.
     parser_optim.add_argument(
-        "--pop_lab", required=False, nargs="+",
+        "--pop-lab", required=False, nargs="+",
         metavar="ID", type=str, default=None,
         help="Population labels (matching those provided in the positional"
         + " argument). Only used to isolate a pair of pops. when there are"
@@ -313,22 +356,16 @@ if __name__ == '__main__':
         + " otherwise not required. Make sure exactly 2 labels are provided.")
     # Prefix of the output file (followed by model and manual exec.).
     parser_optim.add_argument(
-        "--out_prefix", required=False, metavar="FOUT", type=str, default=None,
+        "--out-prefix", required=False, metavar="FOUT", type=str, default=None,
         help="The prefix name of the output file(s). Naming convention:"
         + r" 'out_prefix' + 'Exec$N' + 'model' + '.log' (default: using"
         + " population labels joined by an undercase).")
-    # Optionally, intersect sites provided within a BED file.
     parser_optim.add_argument(
-        "--intersect", type=argparse.FileType("r"), required=False,
-        metavar="BED-LIKE", dest="intersect_sites", default=None,
-        help="A BED-like file with sites which will intersect the"
-        + " SNP files before creating an SFS.")
-    parser_optim.add_argument(
-        "--max_iters", required=False, type=int, nargs="+", default=None,
+        "--max-iters", required=False, type=int, nargs="+", default=None,
         help="Steps of the optimization algorithm (default: the reverse"
         + " of a geometric series starting with '50').")
     parser_optim.add_argument(
-        "--fold_algor", required=False, type=int, nargs="+", default=None,
+        "--fold-algor", required=False, type=int, nargs="+", default=None,
         help="The perturbation of the starting parameters; must be a list"
         + " of ints of length 'ROUNDS' (default: from 'ROUNDS' to '1').")
 
