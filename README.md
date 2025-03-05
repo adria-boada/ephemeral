@@ -27,3 +27,14 @@ l'«environment variable» `PYTHONPATH`.
 export PYTHONPATH="$PYTHONPATH:/home/user/folder"
 ```
 
+Ara s'hauria de poder còrrer el paquet.
+
+```sh
+python3 -m ephemeral
+# Les comandes estan ben documentades.
+python3 -m ephemeral toSFS -h
+
+# També es pot córrer en 'batches' a través d'un shellscript.
+qsub ShellScripts/hercules_moments_pipe.sh
+```
+
