@@ -1,4 +1,6 @@
 
+# This module was obtained from dportik/moments_pipeline in Github.
+
 import numpy
 import moments
 '''

@@ -7,12 +7,15 @@
 
 help_msg = """
 Module which reads an input file with called polymorphisms from sequencing data
-(`*VCF` or `*ngsPool.out` from ngsJulia) and creates a Python3 dictionary from
-it.
+and uses it to create a Python3 dictionary, which is compatible with `moments`.
+
+Available formats for conversion: *sync or *ngsPool.out (output from ngsJulia).
 """
 
 import sys
+# Reading gzipped files.
 import gzip
+# Subsample data and create pseudoreplicates through bootstrapping.
 import random
 
 
@@ -23,14 +26,14 @@ to_sfs_indices = lambda nchr: [i / nchr for i in range(0, nchr + 1)]
 to_abs_diff = lambda saf, sfs_idx: [abs(saf - i) for i in sfs_idx]
 # Compute the allele count (minimum of `abs_diff`).
 to_allele_count = lambda abs_diff: abs_diff.index(min(abs_diff))
-# Decide the correct function to open an input file.
+# Decide the correct function to open an input file depending on extension.
 opener = lambda fin: gzip.open(fin, "rt") if fin.endswith(".gz") else open(fin)
 
 
 def read_bedlike_sites(fin: str):
     """
-    Read a bed-like file and return a set of sites with ("Chr", "Pos") pairs.
-    "Chr" in first column, "Pos" in second column.
+    Read a BED-like file and return a `set` of sites with ("Chr", "Pos") pairs.
+    "Chr" must be in the first column, while "Pos" must be in the second column.
     """
 
     # Create a local function that splits the rows of the input file.
@@ -48,7 +51,7 @@ def read_bedlike_sites(fin: str):
 
 def sort_loci_dict(loci_dict, intersect_sites: set=None):
     """
-    Sort the loci dictionary by "Chr" and "Pos" keys.
+    Sort a loci dictionary by "Chr" and "Pos" keys.
     """
 
     # Sort fields by "Chr", then "Pos", then "Maj_allele", etc.
@@ -73,7 +76,23 @@ def sort_loci_dict(loci_dict, intersect_sites: set=None):
 
 def from_sync_to_loci_dict(fin: str, nchr: int):
     """
-    Read a file "*sync" and convert it to a python dictionary.
+    Read a file "*sync" (possibly gzipped) and convert it to a python
+    dictionary.
+
+    Input
+    -----
+
+    fin : str
+    The path/filename to a "*sync" file, either uncompressed or gzipped.
+
+    nchr : int
+    The number of sets of sequenced chromosomes (depth). It is twice the amount
+    of sequenced individuals for diploid organisms.
+
+    Output
+    ------
+
+    A dictionary which stores "chr", "pos", "alleles" and "allele counts".
     """
 
     # Initialise a function to parse the "sync string" into allele counts.
@@ -82,7 +101,8 @@ def from_sync_to_loci_dict(fin: str, nchr: int):
             sync_string.split(":")[0:4], ("A", "T", "C", "G"))
         if int(count) > 0), key=lambda t: t[1])
     # Initialise the output dictionary. Monomorphisms will be stored as
-    # "Min_allele": "N", "Min_count": 0.
+    # "Min_allele": "N", "Min_count": 0 (as if the minor allele were ambiguous
+    # with an allele count of zero).
     loci = {"Chr": [], "Pos": [], "Maj_allele": [], "Min_allele": [],
             # Counts of allele1 (NA1, major) and allele2 (NA2, minor).
             "Maj_count": [], "Min_count": [], }
@@ -131,15 +151,16 @@ def from_sync_to_loci_dict(fin: str, nchr: int):
 def from_ngsPool_out_to_loci_dict(fin: str, nchr: int,
                                   lrt_snp_thresh: float=6.64):
     """
-    Read a file "*ngsPool.out.gz" and convert it to a python dictionary.
+    Read a file "*ngsPool.out" (possibly gzipped) and convert it to a python
+    dictionary.
 
     Input
     -----
 
     fin : str
-    The path/filename to an "*.ngsPool.out.gz" file, either uncompressed or
+    The path/filename to an "*.ngsPool.out" file, either uncompressed or
     gzipped.
-    
+
     nchr : int
     The number of sets of chromosomes. It is twice the amount of individuals for
     diploid organisms.
@@ -150,8 +171,7 @@ def from_ngsPool_out_to_loci_dict(fin: str, nchr: int,
     Output
     ------
 
-    A dictionary which stores "chr", "pos", "alleles" and "allele counts" for
-    all sites within the "*vcf.gz" file.
+    A dictionary which stores "chr", "pos", "alleles" and "allele counts".
     """
 
     # Initialise the output dictionary. Monomorphisms will be stored as
@@ -287,8 +307,8 @@ def from_loci_dict_to_moments_dict(loci_dicts: list, pop_labels: list):
      ...
     }
 
-    Context, outgroup context and outgroup allele are unset (unknown,
-    for folded SFS).
+    "Context", "outgroup context" and "outgroup allele" are left in blank (unset
+    or unknown, as in a folded SFS).
     """
 
     # Initialise the output dictionary.
@@ -374,7 +394,7 @@ def build_moments_data_dict(fins: list, pop_labels: list, nchroms: list,
     filenames. It will define the highest index of the SFS.
 
     intersect_sites : str
-    A filename that directs to a bed-like file with coordinates arranged as
+    A filename that directs to a BED-like file with coordinates arranged as
     "chr" in first and "pos" in second columns.
     """
 
@@ -416,10 +436,7 @@ def build_moments_data_dict(fins: list, pop_labels: list, nchroms: list,
 
     return moments_dd
 
-
-# ~~~~~~~~~
-
-def distance_thin(data_dict: dict, pop_label: str, unlinked_distance: int):
+def distance_thin(moments_dd: dict, pop_label: str, unlinked_distance: int):
     """
     Iterate across loci in a moments' "data_dict" to make sure that all
     polymorphisms are further away than "unlinked_distance". If two
@@ -429,27 +446,27 @@ def distance_thin(data_dict: dict, pop_label: str, unlinked_distance: int):
     Input
     -----
 
-    data_dict : dict
+    moments_dd : dict
     Output from "from_loci_dict_to_moments_dict".
 
     pop_label : str
-    Population label within the "calls" key of the aforementioned "data_dict".
+    Population label within the "calls" key of the aforementioned "moments_dd".
 
     unlinked_distance : int
-    The distance presumed to be enough for two loci to be unlinked (independent
-    recombination).
+    The distance presumed to be enough for two loci to be unlinked (with
+    independent recombination).
 
     Output
     ------
 
-    A "data_dict" with loci at enough distance for them to be assumed unlinked.
+    A "moments_dd" with loci at enough distance for them to be assumed unlinked.
     """
 
-    unlinked_data_dict = dict()
+    unlinked_moments_dd = dict()
     last_sequid = 0
     last_pos = 0
 
-    for locus, data in data_dict.items():
+    for locus, data in moments_dd.items():
         # Find polymorphic sites (both alleles are at freq. > 0).
         if 0 not in data["calls"][pop_label] and (
                 # Moreover, either the last and present sites are in different
@@ -458,38 +475,64 @@ def distance_thin(data_dict: dict, pop_label: str, unlinked_distance: int):
                 # ...Otherwise, the distance within the sequid is big enough.
                 last_pos + unlinked_distance <= locus[1]):
             # Add the sites which pass both tests.
-            unlinked_data_dict[locus] = data
+            unlinked_moments_dd[locus] = data
             # Update last sequid and last pos.
             last_sequid, last_pos = locus
 
-    return unlinked_data_dict
+    return unlinked_moments_dd
 
-def moments_data_dict_remove_monomorphic(data_dict: dict):
+def remove_monomorphic_sites(moments_dd: dict):
     """
     Removes sites where all populations have a monomorphism.
     """
 
-    new_data_dict = dict()
+    polym_moments_dd = dict()
 
-    for locus, data in data_dict.items():
+    for locus, data in moments_dd.items():
+        # Monomorphisms are composed of a segregating 'ATGC' and an 'N'.
+        # So, if it is not a monomorphism, keep it in the filtered dict.
         if "N" not in data["segregating"]:
-            new_data_dict[locus] = data
+            polym_moments_dd[locus] = data
 
-    return new_data_dict
+    return polym_moments_dd
 
-def moments_data_dict_bootstrap(data_dict: dict,
-                                n_loci: int, n_pseudoreps: int):
+def bootstrap(moments_dd: dict, n_loci: int, n_pseudoreps: int):
     """
-    Create a list of pseudoreplicates from a `data_dict`.
+    Create a list of pseudoreplicate `moments_dd` by randomly sampling subsets.
+
+    Input
+    -----
+
+    moments_dd : dict
+    Output from "from_loci_dict_to_moments_dict".
+
+    n_loci : int
+    asd
+
+    n_pseudoreps : int
+    asd
+
+    Output
+    ------
+
+    A list of pseudoreplicates obtained by subsampling.
     """
 
     # Initialise a list of data-dicts which will be returned.
     pseudoreplicates = list()
-    loci_available = [locus for locus in data_dict.keys()]
+    loci_available = [locus for locus in moments_dd.keys()]
+    if len(loci_available) <= n_loci:
+        print("WARNING: Amount of loci requested per pseudoreplicate is"
+              + " higher than or equal to the amount of loci in the"
+              + " original dataset.")
+        print("WARNING: Num. of loci in the original dataset:"
+              f" {len(loci_available)}")
+        print("WARNING: Num. of loci requested per pseudoreplicate:"
+              f" {n_loci}")
 
-    for pseudorep in range(n_pseudoreps):
+    for _ in range(n_pseudoreps):
         # Create each instance of a pseudoreplicate.
-        new_data_dict = dict()
+        pseudorep_moments_dd = dict()
         loci_sampled_with_replacement = [
             # Randomly draw as many as "n_loci" loci.
             random.choice(loci_available) for _ in range(n_loci)]
@@ -499,59 +542,28 @@ def moments_data_dict_bootstrap(data_dict: dict,
         for i in range(len(loci_sampled_with_replacement)):
             seq, pos = loci_sampled_with_replacement[i]
             # Keys are made up of "seq" and "pos", but also the arbitrary "i".
-            new_data_dict[(seq, pos, i)] = data_dict[seq, pos]
+            pseudorep_moments_dd[(seq, pos, i)] = moments_dd[seq, pos]
         # Append this pseudoreplicate to a list.
-        pseudoreplicates.append(new_data_dict)
+        pseudoreplicates.append(pseudorep_moments_dd)
 
     return pseudoreplicates
 
 
 if __name__ == '__main__':
+    # This module might be easier to test and debug through the script
+    # '__main__.py'.
+    import pprint
+
     # Input strings must be formatted as "label=nchr=file-input".
     pop_labels = [arg.split("=")[0] for arg in sys.argv[1:]]
-    nchroms = [arg.split("=")[1] for arg in sys.argv[1:]]
+    nchroms = [int(arg.split("=")[1]) for arg in sys.argv[1:]]
     fins = [arg.split("=")[2] for arg in sys.argv[1:]]
 
-    # COM PASSEM BED-LIKE FILE? ARGPARSE.
-    ...
-    #
-    # moments_dd = build_moments_data_dict(
+    moments_dd = build_moments_data_dict(fins, pop_labels, nchroms)
+    pprint.pprint(moments_dd)
 
+    bootstrapped_moments_dd = bootstrap(moments_dd,
+                                        n_loci=int(len(moments_dd)/2),
+                                        n_pseudoreps=3)
+    pprint.pprint(bootstrapped_moments_dd)
 
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ debug
-
-def main(first_fin: str, first_nchr: int, first_label: str,
-         second_fin: str, second_nchr: int, second_label: str):
-    """
-    """
-
-    # Translate `*ngsPool.out.gz` files to Pythonic `loci_dict`.
-    first_loci_dict = from_ngsPool_out_to_loci_dict(
-        first_fin, first_nchr)
-    second_loci_dict = from_ngsPool_out_to_loci_dict(
-        second_fin, second_nchr)
-
-    # Collage both Pythonic `loci_dict` into a single dict
-    # following the format of `moments`.
-    moments_dict = from_loci_dict_to_moments_dict(
-        [first_loci_dict, second_loci_dict],
-        [first_label, second_label])
-
-    # Remove sites which are monomorphic in both populations (same allele).
-    moments_dict = moments_data_dict_remove_monomorphic(moments_dict)
-
-    first_thinned = distance_thin(moments_dict, first_label,
-                                  unlinked_distance=500)
-    second_thinned = distance_thin(moments_dict, second_label,
-                                   unlinked_distance=500)
-    mean_thinned = (len(first_thinned) + len(second_thinned)) / 2
-    # Avoid floats.
-    mean_thinned = int(mean_thinned)
-
-    moments_dict = moments_data_dict_bootstrap(moments_dict,
-                                               n_loci=mean_thinned,
-                                               n_pseudoreps=1)
-
-    print(moments_dict[0])
-    return moments_dict[0]
