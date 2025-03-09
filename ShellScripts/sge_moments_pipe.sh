@@ -25,11 +25,13 @@ debug() {
 # Retorna instruccions d'ús.
 retorna_instruccions() {
 	printf "Runs 'moments' optimization pipeline through 'qsub' of Sun Grid Engine.\n"
+	printf "A multidimensional SFS (formatted as 'moments.Spectrum.tofile()') must be provided.\n\n"
 	printf "Usage: %s -m|--model MODEL -l|--pop-label LAB1 -l|--pop-label LAB2 -s|--sfs MULTIDIM-SFS [--debug]\n" "$0"
-	printf "\t%s\n" "--model: model requested for optimization, see module 'ephemeral optim --fit h'."
+	printf "\t%s\n" "--model: model requested for optimization."
+	printf "\t%s\n" "$(echo "--model:" | tr "[:print:]" " ") See available models by running the module 'ephemeral optim --fit h' or in the script 'predefined_models.py'."
 	printf "\t%s\n" "--pop-label: a pair of population labels matching those provided in the SFS. Call the option '-l' twice to provide them."
 	printf "\t%s\n" "--sfs: the output SFS obtained from 'ephemeral toSFS'."
-	printf "\t%s\n" "--debug: Print additional, detailed information helpful for diagnosing problems."
+	printf "\t%s\n" "--debug: print additional, detailed information helpful for diagnosing problems."
 	exit 2
 }
 
