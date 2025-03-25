@@ -19,7 +19,8 @@ import gzip
 import random
 
 
-# Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr]
+# Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr].
+# It will help in translating allele frequency to allele counts.
 to_sfs_indices = lambda nchr: [i / nchr for i in range(0, nchr + 1)]
 # Compute the difference between site allele frequency `saf` and each indice
 # within the list `sfs_idx`.
@@ -27,7 +28,8 @@ to_abs_diff = lambda saf, sfs_idx: [abs(saf - i) for i in sfs_idx]
 # Compute the allele count (minimum of `abs_diff`).
 to_allele_count = lambda abs_diff: abs_diff.index(min(abs_diff))
 # Decide the correct function to open an input file depending on extension.
-opener = lambda fin: gzip.open(fin, "rt") if fin.endswith(".gz") else open(fin)
+opener = lambda fin: gzip.open(fin, "rt") if fin.endswith(".gz") \
+    else open(fin, "rt")
 
 
 def read_bedlike_sites(fin: str):
