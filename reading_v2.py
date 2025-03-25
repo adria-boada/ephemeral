@@ -20,14 +20,189 @@ import os
 
 
 # Decide the correct function to open an input file depending on extension.
-opener = lambda fin: gzip.open(fin, "rt") if fin.endswith(".gz") \
-    else open(fin, "rt")
+opener = lambda finput: gzip.open(finput, "rt") if finput.endswith(".gz") \
+    else open(finput, "rt")
+# Strip and split lines read from a file.
+ss = lambda line, sep=None: line.strip("\n").split(sep)
 
+
+def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
+    """
+    Read a file with polymorphism data. Can be formatted as an "*ngsPool.out" or
+    a "*sync" (possibly gzipped). Yields dictionaries with data per row.
+
+    Usage: 'for data in generator_loci(file, nchr): analyze data'
+
+    Input
+    -----
+
+    finput : str
+    The path/filename to an "*.ngsPool.out" or a "*.sync" file, either
+    uncompressed or gzipped.
+
+    nchr : int
+    The number of sets of sequenced chromosomes (depth). It is twice the amount
+    of sequenced individuals for diploid organisms.
+
+    lrt_snp_thresh : float
+    Threshold to call SNPs if "finput" is formatted as an "*.ngsPool.out". See
+    `ngsJulia` documentation. Otherwise not used for "*.sync".
+    """
+
+    # Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr].
+    # It will help in translating allele frequency to allele counts.
+    to_sfs_indices = lambda nchr: [i / nchr for i in range(0, nchr + 1)]
+    # Initialize a list of frequencies within the SFS with the previous
+    # function.
+    sfs_indice = to_sfs_indices(nchr)
+    # Compute the difference between site allele frequency `saf` and each indice
+    # within the list `sfs_indice`.
+    to_abs_diff = lambda saf, sfs_indice: [abs(saf - i) for i in sfs_indice]
+    # Finally, return the allele count (minimum of `abs_diff`).
+    to_allele_count = lambda abs_diff_list: abs_diff_list.index(
+        min(abs_diff_list))
+
+    if "sync" in finput:
+        print("INFO: Reading the file '" + str(finput)
+              + "' as a SYNC formatted file.")
+
+        # Initialize a function to parse the "sync string" into a list of pairs
+        # of alleles (nucleotide) and allele counts.
+        from_sync_to_allele_depths = lambda sync_string: sorted((
+            (nuc, int(count)) for count, nuc in zip(
+                sync_string.split(":")[0:4], ("A", "T", "C", "G"))
+            if int(count) > 0), key=lambda t: t[1])
+
+        with opener(finput) as fhandle:
+            for line in fhandle:
+                # Split the line by blank space into a list of fields.
+                line = ss(line)
+                # First, check that the reference is unambigous. Otherwise the
+                # "sync string" will not be parseable, i.e. ".:.:.:.".
+                if str(line[2]) not in ("A", "T", "C", "G"):
+                    print("WARNING: Missing data or ambigous reference at "
+                          + str((fields["chr"], fields["pos"]))
+                          + " in file '" + str(finput) + "'; skipping it.")
+                    continue
+                # Parse the information of interest.
+                fields = {
+                    "chr": str(line[0]), "pos": int(line[1]),
+                    "allele_depths": from_sync_to_allele_depths(line[3]), }
+                # If the site is triallelic (more than 2 allele counts), or the site
+                # has missing data (no allele counts), skip the site.
+                if len(fields["allele_depths"]) > 2:
+                    print("WARNING: Triallelic site at "
+                          + str((fields["chr"], fields["pos"]))
+                          + " in file '" + str(finput) + "'; skipping it.")
+                    continue
+                elif len(fields["allele_depths"]) == 0:
+                    print("WARNING: Missing data at "
+                          + str((fields["chr"], fields["pos"]))
+                          + " in file '" + str(finput) + "'; skipping it.")
+                    continue
+                # Yield only one allele (monomorphism).
+                elif len(fields["allele_depths"]) == 1:
+                    nuc, depth = fields["allele_depths"][0]
+                    yield {
+                        "chr": fields["chr"],
+                        "pos": fields["pos"],
+                        "maj_allele": nuc,
+                        "maj_depth": depth,
+                        "maj_freq": 1,
+                        "maj_count": nchr,
+                        "min_allele": "N",
+                        "min_depth": 0,
+                        "min_freq": 0,
+                        "min_count": 0, }
+                # Yield two alleles (polymorphic site).
+                elif len(fields["allele_depths"]) == 2:
+                    (min_nuc, min_depth), (maj_nuc, maj_depth) = \
+                        fields["allele_depths"]
+                    min_freq = min_depth / sum([maj_depth, min_depth])
+                    min_count = to_allele_count(
+                        to_abs_diff(min_freq, sfs_indice))
+                    # For each row in the file "finput", yield a dictionary with
+                    # the data in this row.
+                    yield {
+                        "chr": fields["chr"],
+                        "pos": fields["pos"],
+                        "maj_allele": maj_nuc,
+                        "maj_depth": maj_depth,
+                        "maj_freq": float(1 - min_freq),
+                        "maj_count": int(nchr - min_count),
+                        "min_allele": min_nuc,
+                        "min_depth": min_depth,
+                        "min_freq": float(min_freq),
+                        "min_count": int(min_count), }
+
+    elif "out" in finput or "ngsPool" in finput:
+        print("INFO: Reading the file '" + str(finput)
+              + "' as an ngsPool file from ngsJulia.")
+        # Create a function which categorises the fields from a given line.
+        to_fields = lambda ssline: {
+            "chr": str(ssline[0]), "pos": int(ssline[1]),
+            "maj_allele": str(ssline[4]), "min_allele": str(ssline[5]),
+            "min_saf_mle": float(ssline[10]), "lrt_snp": float(ssline[6]), }
+
+        with opener(finput) as fhandle:
+            # Read the first line, which may be a header.
+            line = fhandle.readline()
+            # If it is not a header, parse it.
+            if not "##chr" in line:
+                line = ss(line)
+                fields = to_fields(line)
+                # If Likelihood-Ratio-Test (LRT) for SNPs is higher than the
+                # threshold, accept it as a polymorphism.
+                if fields["lrt_snp"] > lrt_snp_thresh:
+                    min_count = to_allele_count(
+                        to_abs_diff(fields["min_saf_mle"], sfs_indice))
+                    min_freq = fields["min_saf_mle"]
+                    min_nuc = fields["min_allele"]
+                else:
+                    min_count = 0
+                    min_freq = 0
+                    min_nuc = "N"
+                yield {
+                    "chr": fields["chr"],
+                    "pos": fields["pos"],
+                    "maj_allele": fields["maj_allele"],
+                    "maj_depth": None,
+                    "maj_freq": float(1 - min_freq),
+                    "maj_count": int(nchr - min_count),
+                    "min_allele": min_nuc,
+                    "min_depth": None,
+                    "min_freq": min_freq,
+                    "min_count": min_count, }
+            # Read and parse the rest of the lines in the file.
+            for line in fhandle:
+                line = ss(line)
+                fields = to_fields(line)
+                # If Likelihood-Ratio-Test (LRT) for SNPs is higher than the
+                # threshold, accept it as a polymorphism.
+                if fields["lrt_snp"] > lrt_snp_thresh:
+                    min_count = to_allele_count(
+                        to_abs_diff(fields["min_saf_mle"], sfs_indice))
+                    min_freq = fields["min_saf_mle"]
+                    min_nuc = fields["min_allele"]
+                else:
+                    min_count = 0
+                    min_freq = 0
+                    min_nuc = "N"
+                yield {
+                    "chr": fields["chr"],
+                    "pos": fields["pos"],
+                    "maj_allele": fields["maj_allele"],
+                    "maj_depth": None,
+                    "maj_freq": float(1 - min_freq),
+                    "maj_count": int(nchr - min_count),
+                    "min_allele": min_nuc,
+                    "min_depth": None,
+                    "min_freq": min_freq,
+                    "min_count": min_count, }
 
 def generator_sites(finput: str, chr_column: int=0, pos_column: int=1):
     """
-    Create an iterable generator composed of pairs of "chromosome" and "site"
-    from a BED-like file.
+    Read a BED-like file. Yield pairs of "chromosome" and "site" per row.
 
     Input
     -----
@@ -42,19 +217,34 @@ def generator_sites(finput: str, chr_column: int=0, pos_column: int=1):
     The index (zero-based) of the column within "finput" with "site" info.
     """
 
-    # Create a local function that splits the rows of the input file.
-    ss = lambda line: line.strip("\n").split()
-    
+    print(f"INFO: Reading sites ('chr' and 'pos' pairs) from '{finput}'.")
     with opener(finput) as fhandle:
         for line in fhandle:
             line = ss(line)
+            # Make sure this line is not a header or a comment.
+            if "#" in line[0]: continue
             # Slice the line by provided column indices.
-            chrom, pos = str(line[chr_column]), int(line[pos_column])
+            try: chromosome, pos = str(line[chr_column]), int(line[pos_column])
+            except ValueError as e:
+                raise e(f"'{pos}' was retrieved as a chromosome position"
+                        + f" from '{finput}'. It could not be tipified as an"
+                        + " 'int'; check if the correct column indice is"
+                        + f" '{pos_column}' and also if there are comments"
+                        + " and headers which do not start with '#' as"
+                        + " their first character.")
+            yield chromosome, pos
 
-            yield chrom, pos
 
-def intersect_sites(sites: dict, finp: str,
-                    chrom_column: int=0, pos_column: int=1):
+
+
+
+
+
+
+
+
+def intersect_sites(sites: dict, finput: str,
+                    chr_column: int=0, pos_column: int=1):
     """
     Find the intersection between the sites in 'sites' and the sites in 'finp'.
 
@@ -67,39 +257,70 @@ def intersect_sites(sites: dict, finp: str,
     finp : str
     Name of an input file.
 
-    chrom_column : int
+    chr_column : int
     The index (zero-based) of the column of 'finp' with 'chromosome'.
 
     pos_column : int
     The index (zero-based) of the column of 'finp' with 'position'.
     """
 
-    # Create a local func that splits the rows of the input file.
-    ss = lambda line: line.strip("\n").split()
-    # Initialize an empty dict.
     new_sites = dict()
-
-    with opener(finp) as fhandle:
-        # If 'finp' is ngsPool, skip its header.
-        if finp.endswith("ngsPool.out") or finp.endswith("ngsPool.out.gz"):
-            fhandle.readline()
-        for line in fhandle:
-            # Strip newline and split by blank spaces.
-            line = ss(line)
-            # Slice line by column indices.
-            chrom, pos = str(line[chrom_column]), int(line[pos_column])
-            # If the chromosome or position is not in 'sites', skip it
-            # (this site does not belong to the intersection).
-            if chrom not in sites.keys():
-                continue
-            elif pos not in sites[chrom]:
-                continue
-            # Otherwise, the site belongs to the intersection. Add it.
-            if chrom not in new_sites.keys():
-                new_sites[chrom] = set()
-            new_sites[chrom].add(pos)
+    for chromosome, pos in generator_sites(finput, chr_column, pos_column):
+        # If the chromosome or position is not in 'sites', skip it
+        # (this site does not belong to the intersection).
+        if chromosome not in sites.keys(): continue
+        elif pos not in sites[chromosome]: continue
+        # Otherwise, the site belongs to the intersection. Add it.
+        if chromosome not in new_sites.keys():
+            new_sites[chromosome] = set([pos])
+        else:
+            new_sites[chromosome].add(pos)
 
     return new_sites
+
+def generator_intersecting(first_file: str, other_files: list,
+                           chunksize: int=int(1e6)):
+    """
+    Create an iterable generator composed of groups of sites shared between all
+    given files.
+    """
+
+    sites = dict()
+    memory_warning = True
+
+    for numline, (chromosome, pos) in enumerate(generator_sites(first_file)):
+        if chromosome not in sites.keys():
+            sites[chromosome] = set([pos])
+        else:
+            sites[chromosome].add(pos)
+        # Avoid loading too many sites to RAM. Analyze in chunks.
+        if numline >= chunksize:
+            if memory_warning:
+                print(f"INFO: Potentially more than '{chunksize}' shared sites"
+                      + " between files; will analyze them chunk by chunk"
+                      + " to avoid taking up too much memory.")
+                memory_warning = False
+            for finput in other_files:
+                print("INFO: Finding shared sites between in-memory and"
+                      + f" '{finput}'.")
+                sites = intersect_sites(sites, finput)
+
+            yield sites
+
+    # Yield remaining sites.
+    for finput in other_files:
+        print("INFO: Finding shared sites between in-memory and"
+              + f" '{finput}'.")
+        sites = intersect_sites(sites, finput)
+
+    yield sites
+
+
+
+
+
+
+
 
 def find_intersection_sites(finps: list, intersect_bedlike: str=None):
     """
