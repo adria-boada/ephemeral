@@ -18,9 +18,12 @@ import gzip
 # Create sqlite databases as temporary files.
 import sqlite3
 from tempfile import NamedTemporaryFile
+from pathlib import Path
 # Sanitize sqlite input instead of using placeholders.
 import re
 import os
+
+import moments
 
 
 # Decide the correct function to open an input file depending on extension.
@@ -32,8 +35,9 @@ ss = lambda line, sep=None: line.strip("\n").split(sep)
 
 def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
     """
-    Read a file with polymorphism data. Can be formatted as an "*ngsPool.out" or
-    a "*sync" (possibly gzipped). Yields dictionaries with data per row.
+    Read a file with POOLED polymorphism data. Can be formatted as an
+    "*ngsPool.out" or a "*sync" (possibly gzipped). Yields dictionaries with
+    data per row.
 
     Usage: 'for row_data in generator_loci(file, nchr): process row_data'
 
@@ -45,24 +49,24 @@ def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
     uncompressed or gzipped.
 
     nchr : int
-    The number of sets of sequenced chromosomes (depth). It is twice the amount
-    of sequenced individuals for diploid organisms.
+    The number of sets of chromosomes in the pool (depth). It is twice the
+    amount of sequenced individuals for diploid organisms.
 
     lrt_snp_thresh : float
     Threshold to call SNPs if "finput" is formatted as an "*.ngsPool.out". See
     `ngsJulia` documentation. Otherwise not used for "*.sync".
     """
 
-    # Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr].
-    # It will help in translating allele frequency to allele counts.
+    # Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr], which
+    # is a discrete distribution with "nchr + 1" bins of possible SFS
+    # frequencies. It will help in translating allele freq. to allele counts.
     to_sfs_indices = lambda nchr: [i / nchr for i in range(0, nchr + 1)]
-    # Initialize a list of frequencies within the SFS with the previous
-    # function.
+    # Initialize it.
     sfs_indice = to_sfs_indices(nchr)
-    # Compute the difference between site allele frequency `saf` and each indice
-    # within the list `sfs_indice`.
+    # Compute the difference between site allele frequency "saf" and each indice
+    # within the list "sfs_indice".
     to_abs_diff = lambda saf, sfs_indice: [abs(saf - i) for i in sfs_indice]
-    # Finally, return the allele count (minimum of `abs_diff`).
+    # Finally, return the allele count: the indice of the minimum of "abs_diff".
     to_allele_count = lambda abs_diff_list: abs_diff_list.index(
         min(abs_diff_list))
 
@@ -78,33 +82,36 @@ def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
             if int(count) > 0), key=lambda t: t[1])
 
         with opener(finput) as fhandle:
-            for line in fhandle:
+            for numline, line in enumerate(fhandle):
                 # Split the line by blank space into a list of fields.
                 line = ss(line)
+                # Parse the site "(chr, pos)".
+                fields = {"chr": str(line[0]), "pos": int(line[1]), }
                 # First, check that the reference is unambigous. Otherwise the
                 # "sync string" will not be parseable, i.e. ".:.:.:.".
                 if str(line[2]) not in ("A", "T", "C", "G"):
                     print("WARNING: Missing data or ambigous reference at "
                           + str((fields["chr"], fields["pos"]))
-                          + " in file '" + str(finput) + "'; skipping it.")
+                          + " in file '" + str(finput) + "'; skipping site.",
+                          file=sys.stderr)
                     continue
-                # Parse the information of interest.
-                fields = {
-                    "chr": str(line[0]), "pos": int(line[1]),
-                    "allele_depths": from_sync_to_allele_depths(line[3]), }
-                # If the site is triallelic (more than 2 allele counts), or the site
-                # has missing data (no allele counts), skip the site.
+                # Parse the polymorphism data.
+                fields["allele_depths"] = from_sync_to_allele_depths(line[3])
+                # If the site is triallelic (more than 2 allele counts), or the
+                # site has missing data (no allele counts), skip the site.
                 if len(fields["allele_depths"]) > 2:
                     print("WARNING: Triallelic site at "
                           + str((fields["chr"], fields["pos"]))
-                          + " in file '" + str(finput) + "'; skipping it.")
+                          + " in file '" + str(finput) + "'; skipping site.",
+                          file=sys.stderr)
                     continue
                 elif len(fields["allele_depths"]) == 0:
                     print("WARNING: Missing data at "
                           + str((fields["chr"], fields["pos"]))
-                          + " in file '" + str(finput) + "'; skipping it.")
+                          + " in file '" + str(finput) + "'; skipping site.",
+                          file=sys.stderr)
                     continue
-                # Yield only one allele (monomorphism).
+                # If there is one allele, yield it as a dictionary.
                 elif len(fields["allele_depths"]) == 1:
                     nuc, depth = fields["allele_depths"][0]
                     yield {
@@ -118,11 +125,12 @@ def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
                         "min_depth": 0,
                         "min_freq": 0,
                         "min_count": 0, }
-                # Yield two alleles (polymorphic site).
+                # If there are two alleles (polymorphic sites), yield them as a
+                # dictionary.
                 elif len(fields["allele_depths"]) == 2:
                     (min_nuc, min_depth), (maj_nuc, maj_depth) = \
                         fields["allele_depths"]
-                    min_freq = min_depth / sum([maj_depth, min_depth])
+                    min_freq = min_depth / (maj_depth + min_depth)
                     min_count = to_allele_count(
                         to_abs_diff(min_freq, sfs_indice))
                     # For each row in the file "finput", yield a dictionary with
@@ -139,6 +147,11 @@ def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
                         "min_freq": float(min_freq),
                         "min_count": int(min_count), }
 
+        # Finally, print how many lines have been read.
+        print(f"INFO: Finished! Read {numline + 1} sites/lines"
+              + f" from '{finput}' (inluding triallelic or"
+              + " missing data sites).")
+
     elif "out" in finput or "ngsPool" in finput:
         print("INFO: Reading the file '" + str(finput)
               + "' as an ngsPool file from ngsJulia.")
@@ -148,61 +161,49 @@ def generator_loci(finput: str, nchr: int, lrt_snp_thresh: float=6.64):
             "maj_allele": str(ssline[4]), "min_allele": str(ssline[5]),
             "min_saf_mle": float(ssline[10]), "lrt_snp": float(ssline[6]), }
 
+        def ngsjulia_to_datadict(line):
+            line = ss(line)
+            fields = to_fields(line)
+            # If Likelihood-Ratio-Test (LRT) for SNPs is higher than the
+            # threshold, accept it as a polymorphism (see ngsJulia docs).
+            if fields["lrt_snp"] > lrt_snp_thresh:
+                min_count = to_allele_count(
+                    to_abs_diff(fields["min_saf_mle"], sfs_indice))
+                min_freq = fields["min_saf_mle"]
+                min_nuc = fields["min_allele"]
+            # If LRT is lower than the threshold the site is monomorphic.
+            else:
+                min_count = 0
+                min_freq = 0
+                min_nuc = "N"
+            return {
+                "chr": fields["chr"],
+                "pos": fields["pos"],
+                "maj_allele": fields["maj_allele"],
+                "maj_depth": None,
+                "maj_freq": float(1 - min_freq),
+                "maj_count": int(nchr - min_count),
+                "min_allele": min_nuc,
+                "min_depth": None,
+                "min_freq": min_freq,
+                "min_count": min_count, }
+
         with opener(finput) as fhandle:
             # Read the first line, which may be a header.
             line = fhandle.readline()
             # If it is not a header, parse it.
+            add_to_numlines = 0
             if not "##chr" in line:
-                line = ss(line)
-                fields = to_fields(line)
-                # If Likelihood-Ratio-Test (LRT) for SNPs is higher than the
-                # threshold, accept it as a polymorphism.
-                if fields["lrt_snp"] > lrt_snp_thresh:
-                    min_count = to_allele_count(
-                        to_abs_diff(fields["min_saf_mle"], sfs_indice))
-                    min_freq = fields["min_saf_mle"]
-                    min_nuc = fields["min_allele"]
-                else:
-                    min_count = 0
-                    min_freq = 0
-                    min_nuc = "N"
-                yield {
-                    "chr": fields["chr"],
-                    "pos": fields["pos"],
-                    "maj_allele": fields["maj_allele"],
-                    "maj_depth": None,
-                    "maj_freq": float(1 - min_freq),
-                    "maj_count": int(nchr - min_count),
-                    "min_allele": min_nuc,
-                    "min_depth": None,
-                    "min_freq": min_freq,
-                    "min_count": min_count, }
-            # Read and parse the rest of the lines in the file.
-            for line in fhandle:
-                line = ss(line)
-                fields = to_fields(line)
-                # If Likelihood-Ratio-Test (LRT) for SNPs is higher than the
-                # threshold, accept it as a polymorphism.
-                if fields["lrt_snp"] > lrt_snp_thresh:
-                    min_count = to_allele_count(
-                        to_abs_diff(fields["min_saf_mle"], sfs_indice))
-                    min_freq = fields["min_saf_mle"]
-                    min_nuc = fields["min_allele"]
-                else:
-                    min_count = 0
-                    min_freq = 0
-                    min_nuc = "N"
-                yield {
-                    "chr": fields["chr"],
-                    "pos": fields["pos"],
-                    "maj_allele": fields["maj_allele"],
-                    "maj_depth": None,
-                    "maj_freq": float(1 - min_freq),
-                    "maj_count": int(nchr - min_count),
-                    "min_allele": min_nuc,
-                    "min_depth": None,
-                    "min_freq": min_freq,
-                    "min_count": min_count, }
+                add_to_numlines = 1
+                yield ngsjulia_to_datadict(line)
+            # Start reading and parsing the rest of the lines in the file.
+            for numline, line in enumerate(fhandle):
+                yield ngsjulia_to_datadict(line)
+            numline += add_to_numlines
+
+        # Finally, print how many lines have been read.
+        print(f"INFO: Finished! Read {numline + 1} sites/lines"
+              + f" from '{finput}'.")
 
 def generator_sites(finput: str, chr_column: int=0, pos_column: int=1):
     """
@@ -291,10 +292,11 @@ def populate_new_sqlite_table(generator: iter, tblname: str, db_sqlite: str):
     # Commit these INSERT changes.
     con.commit()
 
-def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
-                      intersect_sites: str=None):
+def _generator_moments_dd(finputs: list, pop_labels: list, nchroms: list,
+                          intersect_sites: str=None):
     """
-    Build a 'moments.data_dictionary' from calling data.
+    Yield moments data dictionary, allowing little footprint on memory usage
+    when creating a moments.Spectrum.
     """
 
     # Check that the three lists in parameters are of the same length.
@@ -302,7 +304,13 @@ def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
         raise Exception("The lists of file inputs, pop. labels and num."
                         + " of chromosomes must be of the same length.")
     # Create a temporary file where an sqlite3 database will be stored.
-    temp_file = NamedTemporaryFile()
+    # Avoid using the directory/partition "/tmp", because the database file
+    # could become too big to fit within there. Instead, place this file in the
+    # home directory.
+    home = Path.home()
+    temp_file = NamedTemporaryFile(dir=home, prefix="ephemeral.tmp")
+    print("INFO: Storing an sqlite3 database with the polymorphism data"
+          + f" in a temporary file at '{temp_file.name}'.")
     # Create a table within the database for each input file.
     for fi, nc, pl in zip(finputs, nchroms, pop_labels):
         generator = generator_loci(fi, nc)
@@ -315,19 +323,25 @@ def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
         intersect_tblname = os.path.split(intersect_sites)[1].split(".")[0]
         populate_new_sqlite_table(generator, intersect_tblname,
                                   temp_file.name)
+
     # Select an inner join of all the tables, equivalent to sites shared across
     # all files/tables.
     con = sqlite3.connect(temp_file.name)
     cur = con.cursor()
     command_intersection_sqlite = str(
-        f"SELECT * FROM {pop_labels[0]} "
-        + " ".join(["INNER JOIN " + pl + " USING (chr,pos)"
+        "SELECT ROW_NUMBER() OVER(ORDER BY chr, pos), *"
+        + f" FROM {pop_labels[0]} "
+        + " ".join(["INNER JOIN " + pl + " USING (chr, pos)"
                     for pl in pop_labels[1:]]))
     if intersect_sites:
         command_intersection_sqlite += str(
-            f" INNER JOIN {intersect_tblname} USING (chr,pos)")
+            f" INNER JOIN {intersect_tblname} USING (chr, pos)")
     print("INFO: Executing the inner join (finding sites shared across"
           + " all of the given files).")
+    #> print(f"DEBUG: {command_intersection_sqlite}")
+
+    # Execute the command to the open sqlite3 database.
+    # The selected rows with polymorphism data are stored in "res".
     res = cur.execute(command_intersection_sqlite)
 
     # Initialize a dictionary which will be later read by moments and converted
@@ -336,11 +350,14 @@ def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
     print("INFO: Building a 'moments data dictionary'.")
     # Iterate across each row (sites) of the inner joined tables.
     for row in res:
-        site = tuple(row[0:2])
+        # (chr, pos) in second and third fields.
+        site = tuple(row[1:3])
+        # Major allele in the fourth field, and repeats every eight.
         maj_alleles = tuple([
-            str(row[i]) for i in range(2, 8 * len(pop_labels) + 2, 8)])
+            str(row[i]) for i in range(3, 8 * len(pop_labels) + 3, 8)])
+        # Minor allele in the eighth field, and repeats every eight.
         min_alleles = tuple([
-            str(row[i]) for i in range(6, 8 * len(pop_labels) + 6, 8)])
+            str(row[i]) for i in range(7, 8 * len(pop_labels) + 7, 8)])
         # Obtain all of the observed alleles at this site.
         alleles = list()
         for a in maj_alleles + min_alleles:
@@ -348,12 +365,16 @@ def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
         alleles = tuple(alleles)
         # If the site is triallelic, skip it.
         if len(alleles) > 2: continue
+        # If the site is monomorphic, add an ambigous nucleotide for formatting
+        # reasons.
         if len(alleles) == 1:
             alleles = (alleles[0], "N")
+        # Major allele count in the seventh field, and repeats every eight.
         maj_counts = tuple([
-            str(row[i]) for i in range(5, 8 * len(pop_labels) + 5, 8)])
+            int(row[i]) for i in range(6, 8 * len(pop_labels) + 6, 8)])
+        # Minor allele count in the eleventh field, and repeats every eight.
         min_counts = tuple([
-            str(row[i]) for i in range(9, 8 * len(pop_labels) + 9, 8)])
+            int(row[i]) for i in range(10, 8 * len(pop_labels) + 10, 8)])
         # Compute calls for each population.
         calls = {
             pop_lab:
@@ -369,8 +390,118 @@ def build_moments_dd(finputs: list, pop_labels: list, nchroms: list,
             "outgroup_allele": "-",
             "segregating": alleles,
             "calls": calls, }
+        # Yield moments_dd every 10 000 rows to avoid overflowing memory with a
+        # massive dictionary.
+        if row[0] % 10000 == 0:
+            print(f"INFO: Reached {row[0]} sites.")
+            yield moments_dd
+            moments_dd = dict()
 
-    return moments_dd
+    # Yield the last moments_dd.
+    print(f"INFO: Reached the end at {row[0]} sites.")
+    if moments_dd: yield moments_dd
+
+def build_moments_sfs(finputs: list, pop_labels: list, nchroms: list,
+                      intersect_sites: str=None):
+    """
+    Build a 'moments.Spectrum' from calling data.
+    """
+
+    # Associate pop. labels with their num. of chr.
+    poplab_to_nchrom = dict()
+    for pl, nc in zip(pop_labels, nchroms):
+        poplab_to_nchrom[str(pl)] = int(nc)
+
+    # Compute combinations of populations to create 1D and 2D (joint) SFS for
+    # each one of them.
+    def combinations(arr):
+        if len(arr) == 0: return [[]]
+        combs = []
+        for c in combinations(arr[1:]):
+            combs += [c, c + [arr[0]]]
+        return combs
+    # Only combinations of 1 or 2 pops. allowed.
+    combinations_pop = [c for c in combinations(pop_labels)
+                            if len(c)==2 or len(c)==1]
+    print("INFO: Creating {} 1D-SFS and {} 2D-SFS.".format(
+        len([c for c in combinations_pop if len(c) == 1]),
+        len([c for c in combinations_pop if len(c) == 2])))
+
+    moments_sfs = dict()
+    for poplabs in combinations_pop:
+        moments_sfs[tuple(poplabs)] = list()
+
+    # Retrieve polymorphism data.
+    gen_moments_dd = _generator_moments_dd(
+        finputs, pop_labels, nchroms, intersect_sites)
+
+    # Create all possible combinations of 1D or 2D SFS with this polymorphism
+    # data.
+    for moments_dd in gen_moments_dd:
+        for poplabs in moments_sfs.keys():
+            # Filter "moments_dd" by removing calls not matching "poplabs".
+            filtered_moments_dd = dict()
+            for site, data in moments_dd.items():
+                filtered_calls = {pl: calls
+                                  for pl, calls in data["calls"].items()
+                                  if pl in poplabs}
+                filtered_moments_dd[site] = data.copy()
+                filtered_moments_dd[site]["calls"] = filtered_calls
+
+            # From the filtered "moments_dd" create an SFS and append it to the
+            # "moments_sfs" dictionary with the key "poplabs".
+            moments_sfs[poplabs].append(
+                moments.Spectrum.from_data_dict(
+                    filtered_moments_dd, poplabs,
+                    [poplab_to_nchrom[pl] for pl in poplabs],
+                    mask_corners=False, polarized=False))
+            # Summing the sites of a pair of SFS into a single SFS.
+            # It reduces the amount of data in memory.
+            moments_sfs[poplabs] = [sum(moments_sfs[poplabs])]
+
+    # PRINT STATS OF THE NEWLY CREATED SFS?
+
+    # Return all of the SFS. Remember to remove the temporary list the SFS are
+    # in (i.e. slice and return the first item).
+    return {key: val[0] for key, val in moments_sfs.items()}
+
+
+
+    # RETALLS!!!
+    ...
+
+    # Create an output SFS filename from a list/tuple of pop. labels.
+    sfs_filename = lambda poplabs: (
+        str(poplabs[0]) + ".sfs" if len(poplabs) == 2
+        else
+        "joint." + str(poplabs[0]) + "." + str(poplabs[1]) + ".sfs")
+
+
+    # Create a list of moments.Spectrum for pops in "moments_sfs.keys()".
+
+    moments_dd = next(gen_moments_dd)
+    # Initialize SFS for each population and for each pair of pops.
+    for comb in combinations_sfs:
+        ...
+        # CREATE FILENAME:
+    moments_sfs = moments.Spectrum.from_data_dict(
+        moments_dd, pop_labels, nchroms,
+        mask_corners=False, polarized=False)
+
+    for moments_dd in gen_moments_dd:
+        moments_sfs += moments.Spectrum.from_data_dict(
+            moments_dd, pop_labels, nchroms,
+            mask_corners=False, polarized=False)
+
+    # Create a folder to store definitive SFS.
+    try:
+        os.makedirs(outfolder)
+    except OSError:
+        raise OSError(f"The path to create '{outfolder}' already exists.")
+
+    return moments_sfs
+
+
 
 
 
