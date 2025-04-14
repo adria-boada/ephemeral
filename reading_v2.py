@@ -11,7 +11,7 @@ pooled sequencing data with the goal of creating a `moments.Spectrum` --a Site
 Frequency Spectrum implementation in Python.
 
 Available formats for conversion to `moments.Spectrum`:
-- *sync 
+- *sync
 - *ngsPool.out (output from ngsJulia).
 """
 
@@ -481,9 +481,9 @@ def from_dbrow_to_moments_dd(db_row, pop_labels):
     if len(alleles) == 1:
         alleles = (alleles[0], "N")
     # Major allele counts in the seventh field "6", and repeats every eight.
-    maj_counts = tuple([str(db_row[i]) for i in range(6, len_dbrow, 8)])
+    maj_counts = tuple([int(db_row[i]) for i in range(6, len_dbrow, 8)])
     # Minor allele counts in the eleventh field "10", and repeats every eight.
-    min_counts = tuple([str(db_row[i]) for i in range(10, len_dbrow, 8)])
+    min_counts = tuple([int(db_row[i]) for i in range(10, len_dbrow, 8)])
     # Compute calls for each population.
     calls = {
         pop_lab:
@@ -501,13 +501,64 @@ def from_dbrow_to_moments_dd(db_row, pop_labels):
 
     return site, data_dict
 
-def generator_moments_dd(finputs: list, pop_labels:list, nchroms: list,
-                         intersect_sites: str=None):
+def combinations_populations(pop_labels: list):
     """
-    Yield moments data dictionary in a loop, allowing little footprint on memory
-    usage when creating a "moments.Spectrum". These can be appended to a list
-    and summed.
+    Compute possible combinations of a single or a pair of populations, in order
+    to compute all possible 1D and 2D SFS.
     """
+
+    def combine(arr):
+        if len(arr) == 0: return [[]]
+        combs = []
+        for c in combine(arr[1:]):
+            combs += [c, c + [arr[0]]]
+        return combs
+    # Only combinations of one or two items (pops) allowed.
+    pop_combinations = [c for c in combine(pop_labels)
+                        if len(c) == 1 or len(c) == 2]
+
+    return {tuple(combo): list() for combo in pop_combinations}
+
+def from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom):
+    """
+    """
+
+    for poplabs in sfs_dict.keys():
+        # Now, "moments_dd" has all of the provided population calling data.
+        # Filter the pop. ids. we are interested in.
+        filtered_moments_dd = dict()
+        for site, data in moments_dd.items():
+            filtered_calls = {pl: calls
+                              for pl, calls in data["calls"].items()
+                              if pl in poplabs}
+
+            filtered_moments_dd[site] = data.copy()
+            filtered_moments_dd[site]["calls"] = filtered_calls
+
+        # From the filtered "moments_dd" create an SFS and append it to the
+        # "sfs_dict" dictionary with the key "poplabs".
+        sfs_dict[poplabs].append(
+            moments.Spectrum.from_data_dict(
+                filtered_moments_dd, pop_ids=poplabs,
+                projections=[int(poplab_to_nchrom[pl]) for pl in poplabs],
+                mask_corners=False, polarized=False))
+        # Summing the sites of a pair of SFS into a single SFS.
+        # It reduces the amount of data in memory.
+        sfs_dict[poplabs] = [sum(sfs_dict[poplabs])]
+
+    return None
+
+def main(finputs: list, pop_labels:list, nchroms: list,
+         intersect_sites: str=None):
+    """
+    Create multiple "moments.Spectrum" from a list of input files with variant
+    call data.
+    """
+
+    # Associate pop. labels with their num. of chr.
+    poplab_to_nchrom = dict()
+    for pl, nc in zip(pop_labels, nchroms):
+        poplab_to_nchrom[str(pl)] = int(nc)
 
     # Check that the three lists in parameters are of the same length.
     if len(finputs) != len(pop_labels) or len(finputs) != len(nchroms):
@@ -517,7 +568,7 @@ def generator_moments_dd(finputs: list, pop_labels:list, nchroms: list,
     # Avoid using the directory/partition "/tmp", because the database file
     # could become too big to fit within there. Instead, place this file in the
     # home directory.
-    home = Path.home()
+    home = pathlib.Path.home()
     temp_file = tempfile.NamedTemporaryFile(dir=home, prefix="ephemeral.tmp")
     print("INFO: Storing an sqlite3 database with the polymorphism data"
           + f" in a temporary file at '{temp_file.name}'.")
@@ -529,13 +580,13 @@ def generator_moments_dd(finputs: list, pop_labels:list, nchroms: list,
             print(f"INFO: Reading '{fi}' as a SYNC-formatted"
                   + " file.")
             parser = ParserGenData.from_sync(fi, nc)
-            parser.populate_new_sqlite_table(pl, temp_file)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
         # Try to find an "out" or "ngspool" extension.
         elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
             print(f"INFO: Reading '{fi}' as an ngsPool-formatted"
                   + " file.")
             parser = ParserGenData.from_ngsPool(fi, nc)
-            parser.populate_new_sqlite_table(pl, temp_file)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
         # It was not possible to detect the correct file extension.
         else:
             raise Exception("Could not detect the correct file"
@@ -544,43 +595,62 @@ def generator_moments_dd(finputs: list, pop_labels:list, nchroms: list,
                             + " 'out' or 'ngsPool' for ngsPool files"
                             + " (either lower or upper case).")
 
-    if not intersect_sites:
-        print("INFO: Executing the inner join (finding sites shared across"
-              + " all of the given files).")
-        db_res, db_tblnames = select_shared_loci(temp_file)
-        if pop_labels != db_tblnames:
-            print("WARNING: Unexpected order for the database column.")
-    else:
+    if intersect_sites:
         print(f"INFO: Reading the BED '{intersect_sites}'"
               + " with intersecting sites.")
         parser = ParserGenData.from_bed(intersect_sites)
         # Remove directory and extensions from filename so it can be used as
         # table name.
         intersect_tblname = os.path.split(intersect_sites)[1].split(".")[0]
-        parser.populate_new_sqlite_table(intersect_tblname, temp_file)
-        print("INFO: Executing the inner join (finding sites shared across"
-              + " all of the given files).")
-        db_res, db_tblnames = select_shared_loci(temp_file)
-        if pop_labels != db_tblnames[:-1]:
-            print("WARNING: Unexpected order for the database column.")
+        parser.populate_new_sqlite_table(intersect_tblname, temp_file.name)
 
-    # Initialize a dictionary which will be later read by moments and converted
-    # to an SFS.
+    print("INFO: Executing the inner join of the database with the columns"
+          + " 'chromosome' and 'pos' (finding sites shared across"
+          + " all of the given files).")
+    db_res, db_tblnames = select_shared_loci(temp_file.name)
+
+    # Remove the "intersect_tblname" from "db_tblnames".
+    if intersect_sites:
+        db_tblnames = db_tblnames[:-1]
+    if list(pop_labels) != list(db_tblnames):
+        print("WARNING: Unexpected order for the columns of the database.")
+        print("DEBUG:", pop_labels, db_tblnames)
+
+    # Initialize combinations of pop. labels of which an SFS will be computed.
+    sfs_dict = combinations_populations(pop_labels)
+    amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
+    amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
+    print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
+        amount_sfs_onedim, amount_sfs_bidim))
+    print("INFO: Adding sites from the input polymorphism calling data"
+          + " to these SFS iteratively.")
+
+    # Start iterating through sites.
     moments_dd = dict()
-    print("INFO: Converting data to a 'moments data dictionary'.")
     for db_row in db_res:
         site, data_dict = from_dbrow_to_moments_dd(db_row, pop_labels)
         moments_dd[site] = data_dict
-        # Yield moments_dd every 100 000 rows to avoid overflowing memory with a
-        # massive dictionary.
-        if db_row[0] % 100000 == 0:
-            print(f"INFO: Reached {row[0]} sites.")
-            yield moments_dd
-            moments_dd = dict()
+        # Avoid loading into memory all of the sites at once. When the loop
+        # reaches the 100 000th site, convert this data into SFS. Repeat the
+        # process and sum the vectors or matrices (1D or 2D SFS) converted at
+        # each step.
+        row_num = db_row[0]
+        if row_num % 100000 == 0:
+            print(f"INFO: Reached {row_num} sites.")
 
-    # Yield the last moments_dd.
-    print(f"INFO: Reached the end at {row[0]} sites.")
-    if moments_dd: yield moments_dd
+            # Compute SFS for the keys (pair or single pop.) in
+            # "sfs_dict.keys()".
+            from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
+    # Finally, the remaining "moments_dd" if the amount of sites are not
+    # modulo 100 000:
+    print(f"INFO: Reached the end at {row_num} sites.")
+    if moments_dd:
+        from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
+    # PROCESS STATS OF THE NEWLY CREATED SFS?
+
+    # Return all of the SFS. Remember to remove the temporary list the SFS are
+    # in (i.e. slice and return the first item).
+    return {key: val[0] for key, val in sfs_dict.items()}
 
