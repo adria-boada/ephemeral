@@ -41,7 +41,7 @@ ss = lambda line, sep=None: line.strip("\n").split(sep)
 # placeholders, which could allow sqlite injection attacks.
 # If the regex doesn't match, raise Exception.
 def sanitized_sqlite(parameter: str):
-    allowed_regex = r"[a-zA-Z0-9_-]+"
+    allowed_regex = r"[\+a-zA-Z0-9_-]+"
     if not re.fullmatch(allowed_regex, parameter):
         raise Exception(f"The parameter '{parameter}' is not"
                         + " sanitized for it to be used with"
@@ -70,7 +70,12 @@ class ParserGenData:
         self._func_generator = func_generator
         if nchr:
             self.nchr = nchr
-            self.sfs_frequencies = self.to_sfs_frequencies()
+            # Create a list of [0/nchr, 1/nchr, etc. nchr/nchr], which is a
+            # discrete distribution with "nchr + 1" bins of the possible allele
+            # frequencies in an SFS with "nchr" sequences/chromosomes/haploid
+            # samples. It will help in translating continuous allele frequencies
+            # to discrete allele counts.
+            self.sfs_frequencies = [i / nchr for i in range(0, nchr + 1)]
         if lrt_snp_thresh:
             self.lrt_snp_thresh = lrt_snp_thresh
 
@@ -78,16 +83,6 @@ class ParserGenData:
 
     def __iter__(self):
         return iter(self._func_generator(self))
-
-    def to_sfs_frequencies(self):
-        """
-        Create a list of [0/nchr, 1/nchr, etc. nchr/nchr], which is a discrete
-        distribution with "nchr + 1" bins of possible allele frequencies in an
-        SFS. It will help in translating continuous allele freq. to discrete
-        allele counts.
-        """
-
-        return [i / self.nchr for i in range(0, self.nchr + 1)]
 
     def saf_to_allele_count(self, saf):
         """
@@ -142,8 +137,8 @@ class ParserGenData:
                         "chr": chromosome,
                         "pos": pos, }
 
-            # Store stats after reaching EOF.
-            self.numlines = numline + 1
+            # Store num. of lines (sites in data) after reaching EOF.
+            self.numsites = numline + 1 - self.skipped_comment
 
         return cls(filename, generator)
 
@@ -247,7 +242,9 @@ class ParserGenData:
                     dd = sync_to_datadict(line)
                     if dd: yield dd
 
-            self.numlines = numline + 1
+            # "enumerate" starts at 0, and we process the first line before the
+            # "enumerate" for-loop; we need to add 2 to obtain num. of sites.
+            self.numsites = numline + 2
 
         return cls(filename, generator, nchr=nchr)
 
@@ -331,9 +328,9 @@ class ParserGenData:
                 for numline, line in enumerate(fhandle):
                     yield ngsjulia_to_datadict(line)
 
-            # Add the first line parsed outside the for-loop and increment
-            # it by one more because "enumerate" starts with zero.
-            self.numlines = numline + 2
+            # "enumerate" starts at 0, and we process the first line before the
+            # "enumerate" for-loop; we need to add 2 to obtain num. of sites.
+            self.numsites = numline + 2
 
         return cls(filename, generator, nchr=nchr,
                    lrt_snp_thresh=lrt_snp_thresh)
@@ -421,6 +418,7 @@ def select_shared_loci(db_sqlite: str):
 
 def select_median(colname: str, tblname: str, db_sqlite: str):
     """
+    Returns the median of a numeric column in a sqlite3 database.
     """
 
     # Open a connection and a cursor to the sqlite database.
@@ -428,9 +426,10 @@ def select_median(colname: str, tblname: str, db_sqlite: str):
     cur = con.cursor()
     # Try to avoid SQL injections by sanitizing input.
     [sanitized_sqlite(param) for param in (tblname, colname)]
+
     command_median = str(
-        f"SELECT AVG({colname}) FROM"
-        + f" (SELECT {colname} FROM {tblname} ORDER BY {colname}"
+        "SELECT AVG(x) FROM"
+        + f" (SELECT {colname} AS x FROM {tblname} ORDER BY x"
         + f" LIMIT 2 - (SELECT COUNT(*) FROM {tblname}) % 2"
         + f" OFFSET (SELECT (COUNT(*) - 1) / 2 FROM {tblname}))"
     )
@@ -438,10 +437,11 @@ def select_median(colname: str, tblname: str, db_sqlite: str):
 
     # "median" is an iterable of tuples (database query); return only the first
     # item of the first tuple (a number).
-    return median.fetchone()[0]
+    return float(median.fetchone()[0])
 
 def select_average(colname: str, tblname: str, db_sqlite: str):
     """
+    Returns the average of a numeric column in a sqlite3 database.
     """
 
     # Open a connection and a cursor to the sqlite database.
@@ -449,12 +449,37 @@ def select_average(colname: str, tblname: str, db_sqlite: str):
     cur = con.cursor()
     # Try to avoid SQL injections by sanitizing input.
     [sanitized_sqlite(param) for param in (tblname, colname)]
+
     command_average = str(f"SELECT AVG({colname}) FROM {tblname}")
     average = cur.execute(command_average)
 
     # "average" is an iterable of tuples (database query); return only the first
     # item of the first tuple (a number).
-    return average.fetchone()[0]
+    return float(average.fetchone()[0])
+
+def select_average_expected_heterozygosity(tblname: str, db_sqlite: str,
+                                           colname_minfreq: str="min_freq"):
+    """
+    Returns the average across all sites of the expected heterozygosity
+    (as in Nei's genetic diversity estimator).
+    """
+
+    # Open a connection and a cursor to the sqlite database.
+    con = sqlite3.connect(db_sqlite)
+    cur = con.cursor()
+    # Try to avoid SQL injections by sanitizing input.
+    [sanitized_sqlite(param) for param in (tblname, colname_minfreq)]
+
+    command_average_expected_heterozygosity = str(
+        "SELECT SUM(heteroz) / COUNT(heteroz) FROM ("
+            + "SELECT 1 - (x * x) - ((1 - x) * (1 - x)) AS heteroz FROM ("
+                + f"SELECT {colname_minfreq} AS x FROM {tblname}))"
+    )
+    avg_exp_hetero = cur.execute(command_average_expected_heterozygosity)
+
+    # "avg_exp_hetero" is an iterable of tuples (database query); return only
+    # the first item of the first tuple (a number).
+    return float(avg_exp_hetero.fetchone()[0])
 
 def from_dbrow_to_moments_dd(db_row, pop_labels):
     """
@@ -521,6 +546,8 @@ def combinations_populations(pop_labels: list):
 
 def from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom):
     """
+    Modifies in place "sfs_dict" by adding information from sites in
+    "moments_dd".
     """
 
     for poplabs in sfs_dict.keys():
@@ -560,40 +587,99 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     for pl, nc in zip(pop_labels, nchroms):
         poplab_to_nchrom[str(pl)] = int(nc)
 
-    # Check that the three lists in parameters are of the same length.
-    if len(finputs) != len(pop_labels) or len(finputs) != len(nchroms):
-        raise Exception("The lists of file inputs, pop. labels and num."
-                        + " of chromosomes must be of the same length.")
-    # Create a temporary file where an sqlite3 database will be stored.
-    # Avoid using the directory/partition "/tmp", because the database file
-    # could become too big to fit within there. Instead, place this file in the
-    # home directory.
-    home = pathlib.Path.home()
-    temp_file = tempfile.NamedTemporaryFile(dir=home, prefix="ephemeral.tmp")
-    print("INFO: Storing an sqlite3 database with the polymorphism data"
-          + f" in a temporary file at '{temp_file.name}'.")
+    # Initialize combinations of pop. labels of which an SFS will be computed.
+    sfs_dict = combinations_populations(pop_labels)
+    amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
+    amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
+    print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
+        amount_sfs_onedim, amount_sfs_bidim))
 
-    # Create a table within the database for each input file.
-    for fi, nc, pl in zip(finputs, nchroms, pop_labels):
-        # Try to find a "sync" extension.
+    # Initialize a dictionary to store "stats" regarding the analysis.
+    stats = {
+        "index": list(),
+        "sites_total": list(),
+        # Included sites are all lines with data minus skipped lines, which are
+        # "None" for the ngsPool and BED parsers; only applicable to sync files.
+        "sites_included": list(),
+        "skipped_comment": list(),
+        "sites_skipped_ambiguous_ref": list(),
+        "sites_skipped_missing_data": list(),
+        "sites_skipped_triallelic": list(),
+        "median_depth": list(),
+        "mean_depth": list(),
+        "average_expected_heterozygosity": list(),
+    }
+
+    # Tell which files will be read as SYNC or ngsPool...
+    for fi in finputs:
         if "sync" in str(fi).lower():
-            print(f"INFO: Reading '{fi}' as a SYNC-formatted"
-                  + " file.")
-            parser = ParserGenData.from_sync(fi, nc)
-            parser.populate_new_sqlite_table(pl, temp_file.name)
-        # Try to find an "out" or "ngspool" extension.
+            print(f"INFO: Detected that '{fi}' is a SYNC-formatted file.")
         elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
-            print(f"INFO: Reading '{fi}' as an ngsPool-formatted"
+            print(f"INFO: Detected that '{fi}' is an ngsPool-formatted"
                   + " file.")
-            parser = ParserGenData.from_ngsPool(fi, nc)
-            parser.populate_new_sqlite_table(pl, temp_file.name)
-        # It was not possible to detect the correct file extension.
         else:
             raise Exception("Could not detect the correct file"
                             + f" extension for '{fi}'; accepts"
                             + " 'sync' for SYNC files and"
                             + " 'out' or 'ngsPool' for ngsPool files"
                             + " (either lower or upper case).")
+
+    # Check that the three lists in parameters are of the same length.
+    if len(finputs) != len(pop_labels) or len(finputs) != len(nchroms):
+        raise Exception("The lists of file inputs, pop. labels and num."
+                        + " of chromosomes must be of the same length.")
+
+    # Create a temporary file where an sqlite3 database will be stored.
+    # Avoid using the directory/partition "/tmp", because the database file
+    # could become too big to fit within there. Instead, place this file in the
+    # home directory.
+    home = pathlib.Path.home()
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=home, prefix="ephemeral.tmp", suffix=".sqlite3")
+    print("INFO: Storing an sqlite3 database with the polymorphism data"
+          + f" in a temporary file at '{temp_file.name}'.")
+
+    # Create a table within the database for each input file.
+    for fi, nc, pl in zip(finputs, nchroms, pop_labels):
+        print(f"INFO: Reading '{fi}' and writing data to database.")
+        # Try to find a "sync" extension.
+        if "sync" in str(fi).lower():
+            parser = ParserGenData.from_sync(fi, nc)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
+            # Compute stats of this data file.
+            stats["index"].append(pl)
+            stats["sites_total"].append(parser.numsites)
+            stats["sites_included"].append(
+                parser.numsites - (parser.skipped_ambiguous_ref
+                    + parser.skipped_missing_data + parser.skipped_triallelic)
+            )
+            stats["skipped_comment"].append(parser.skipped_comment)
+            stats["sites_skipped_ambiguous_ref"].append(parser.skipped_ambiguous_ref)
+            stats["sites_skipped_missing_data"].append(parser.skipped_missing_data)
+            stats["sites_skipped_triallelic"].append(parser.skipped_triallelic)
+            stats["median_depth"].append(
+                select_median("maj_depth+min_depth", pl, temp_file.name))
+            stats["mean_depth"].append(
+                select_average("maj_depth+min_depth", pl, temp_file.name))
+            stats["average_expected_heterozygosity"].append(
+                select_average_expected_heterozygosity(pl, temp_file.name))
+
+        # Try to find an "out" or "ngspool" extension.
+        elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
+            parser = ParserGenData.from_ngsPool(fi, nc)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
+            # Compute stats of this data file.
+            stats["index"].append(pl)
+            stats["sites_total"].append(parser.numsites)
+            stats["sites_included"].append( parser.numsites)
+            stats["skipped_comment"].append(parser.skipped_comment)
+            stats["sites_skipped_ambiguous_ref"].append(None)
+            stats["sites_skipped_missing_data"].append(None)
+            stats["sites_skipped_triallelic"].append(None)
+            stats["median_depth"].append(None)
+            stats["mean_depth"].append(None)
+            stats["average_expected_heterozygosity"].append(
+                select_average_expected_heterozygosity(pl, temp_file.name))
 
     if intersect_sites:
         print(f"INFO: Reading the BED '{intersect_sites}'"
@@ -603,6 +689,32 @@ def main(finputs: list, pop_labels:list, nchroms: list,
         # table name.
         intersect_tblname = os.path.split(intersect_sites)[1].split(".")[0]
         parser.populate_new_sqlite_table(intersect_tblname, temp_file.name)
+        # Compute stats of this data file.
+        stats["index"].append("INTERSECT.BED")
+        stats["sites_total"].append(parser.numsites)
+        stats["sites_included"].append( parser.numsites)
+        stats["skipped_comment"].append(parser.skipped_comment)
+        stats["sites_skipped_ambiguous_ref"].append(None)
+        stats["sites_skipped_missing_data"].append(None)
+        stats["sites_skipped_triallelic"].append(None)
+        stats["median_depth"].append(None)
+        stats["median_depth"].append(None)
+        stats["average_expected_heterozygosity"].append(None)
+
+    print("INFO: Finished reading input data; printing stats.")
+    # Add hashtag '#' to header.
+    print("#", end="")
+    for colname in stats.keys():
+        print(colname, end="\t")
+    # Add a newline.
+    print()
+    for rowi in range(len(stats[colname])):
+        for val in [values[rowi] for values in stats.values()]:
+            print(val, end="\t")
+        # Add a newline.
+        print()
+
+
 
     print("INFO: Executing the inner join of the database with the columns"
           + " 'chromosome' and 'pos' (finding sites shared across"
@@ -616,12 +728,6 @@ def main(finputs: list, pop_labels:list, nchroms: list,
         print("WARNING: Unexpected order for the columns of the database.")
         print("DEBUG:", pop_labels, db_tblnames)
 
-    # Initialize combinations of pop. labels of which an SFS will be computed.
-    sfs_dict = combinations_populations(pop_labels)
-    amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
-    amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
-    print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
-        amount_sfs_onedim, amount_sfs_bidim))
     print("INFO: Adding sites from the input polymorphism calling data"
           + " to these SFS iteratively.")
 
@@ -652,5 +758,5 @@ def main(finputs: list, pop_labels:list, nchroms: list,
 
     # Return all of the SFS. Remember to remove the temporary list the SFS are
     # in (i.e. slice and return the first item).
-    return {key: val[0] for key, val in sfs_dict.items()}
+    return {key: val[0] for key, val in sfs_dict.items()}, stats
 
