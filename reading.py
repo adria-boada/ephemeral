@@ -1,571 +1,795 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Reading.py
+# reading_v3.py
 #
-# 20 de des. 2024  <adria@molevol-OptiPlex-9020>
+# 06 d’abr. 2025  <adria@molevol-OptiPlex-9020>
 
 help_msg = """
-Module which reads an input file with called polymorphisms from sequencing data
-and uses it to create a Python3 dictionary, which is compatible with `moments`.
+Module responsible for reading input files with called polymorphisms from
+pooled sequencing data with the goal of creating a `moments.Spectrum` --a Site
+Frequency Spectrum implementation in Python.
 
-Available formats for conversion: *sync or *ngsPool.out (output from ngsJulia).
+Available formats for conversion to `moments.Spectrum`:
+- *sync
+- *ngsPool.out (output from ngsJulia).
 """
 
-import sys
-# Reading gzipped files.
+# Input files could be gzipped.
 import gzip
-# Subsample data and create pseudoreplicates through bootstrapping.
-import random
+# Create sqlite3 databases as temporary data files in the home directory.
+import sqlite3
+import tempfile
+import pathlib
+# Sanitize sqlite3 input with regex instead of using placeholders.
+import re
+# To assign a name to the sqlite3 table created with the BED intersection sites,
+# we will use its filename.
+import os.path
+# Conversion from data dictionaries to `moments.Spectrum`.
+import moments.Spectrum_mod
 
 
-# Function which creates a list of [0/nchr, 1/nchr, etc. nchr/nchr].
-# It will help in translating allele frequency to allele counts.
-to_sfs_indices = lambda nchr: [i / nchr for i in range(0, nchr + 1)]
-# Compute the difference between site allele frequency `saf` and each indice
-# within the list `sfs_idx`.
-to_abs_diff = lambda saf, sfs_idx: [abs(saf - i) for i in sfs_idx]
-# Compute the allele count (minimum of `abs_diff`).
-to_allele_count = lambda abs_diff: abs_diff.index(min(abs_diff))
-# Decide the correct function to open an input file depending on extension.
-opener = lambda fin: gzip.open(fin, "rt") if fin.endswith(".gz") \
-    else open(fin, "rt")
-
-
-def read_bedlike_sites(fin: str):
-    """
-    Read a BED-like file and return a `set` of sites with ("Chr", "Pos") pairs.
-    "Chr" must be in the first column, while "Pos" must be in the second column.
-    """
-
-    # Create a local function that splits the rows of the input file.
-    ss = lambda line: line.strip("\n").split()
-    # Initialise an empty set to fill in with sites.
-    sites = set()
-
-    with opener(fin) as f:
-        for line in f:
-            crm, pos = ss(line)[0:2]
-            site = (str(crm), int(pos))
-            sites.add(site)
-
-    return sites
-
-def sort_loci_dict(loci_dict, intersect_sites: set=None):
-    """
-    Sort a loci dictionary by "Chr" and "Pos" keys.
-    """
-
-    # Sort fields by "Chr", then "Pos", then "Maj_allele", etc.
-    sorted_fields = sorted(zip(
-        loci_dict["Chr"], loci_dict["Pos"],
-        loci_dict["Maj_allele"], loci_dict["Min_allele"],
-        loci_dict["Maj_count"], loci_dict["Min_count"]))
-    # Remove sites which are not found in `intersect_sites`
-    if intersect_sites:
-        sorted_fields = list(filter(
-            lambda i: (i[0], i[1]) in intersect_sites,
-            sorted_fields))
-    # Recombine tuples into a dictionary of lists.
-    sorted_loci = {"Chr": [f[0] for f in sorted_fields],
-            "Pos": [f[1] for f in sorted_fields],
-            "Maj_allele": [f[2] for f in sorted_fields],
-            "Min_allele": [f[3] for f in sorted_fields],
-            "Maj_count": [f[4] for f in sorted_fields],
-            "Min_count": [f[5] for f in sorted_fields], }
-
-    return sorted_loci
-
-def from_sync_to_loci_dict(fin: str, nchr: int):
-    """
-    Read a file "*sync" (possibly gzipped) and convert it to a python
-    dictionary.
-
-    Input
-    -----
-
-    fin : str
-    The path/filename to a "*sync" file, either uncompressed or gzipped.
-
-    nchr : int
-    The number of sets of sequenced chromosomes (depth). It is twice the amount
-    of sequenced individuals for diploid organisms.
-
-    Output
-    ------
-
-    A dictionary which stores "chr", "pos", "alleles" and "allele counts".
-    """
-
-    # Initialise a function to parse the "sync string" into allele counts.
-    from_sync_to_allele_count = lambda sync_string: sorted((
-        (nuc, int(count)) for count, nuc in zip(
+# Decide if a file is compressed or uncompressed and open it with the correct
+# function depending on its extension.
+opener = lambda finput: (
+    gzip.open(finput, "rt") if finput.endswith(".gz")
+    else open(finput, "rt"))
+# Strip and split lines read from a file.
+ss = lambda line, sep=None: line.strip("\n").split(sep)
+# Sanitize sqlite3 input, because table names cannot be created with
+# placeholders, which could allow sqlite injection attacks.
+# If the regex doesn't match, raise Exception.
+def sanitized_sqlite(parameter: str):
+    allowed_regex = r"[\+a-zA-Z0-9_-]+"
+    if not re.fullmatch(allowed_regex, parameter):
+        raise Exception(f"The parameter '{parameter}' is not"
+                        + " sanitized for it to be used with"
+                        + " sqlite3; it must be a string"
+                        + f" matching '{allowed_regex}'.")
+# Parse a "sync string" (its fourth column) into a list of pairs of alleles
+# (nucleotides) and allele counts.
+def from_syncstring_to_allele_depths(sync_string):
+    return sorted(((nuc, int(count)) for count, nuc in zip(
             sync_string.split(":")[0:4], ("A", "T", "C", "G"))
-        if int(count) > 0), key=lambda t: t[1])
-    # Initialise the output dictionary. Monomorphisms will be stored as
-    # "Min_allele": "N", "Min_count": 0 (as if the minor allele were ambiguous
-    # with an allele count of zero).
-    loci = {"Chr": [], "Pos": [], "Maj_allele": [], "Min_allele": [],
-            # Counts of allele1 (NA1, major) and allele2 (NA2, minor).
-            "Maj_count": [], "Min_count": [], }
-    # Create a local function that splits the rows of the input file.
-    ss = lambda line: line.strip("\n").split()
-    # Create a function which categorises the fields of a given line.
-    to_fields = lambda line: {
-        "Chr": str(ss(line)[0]), "Pos": int(ss(line)[1]),
-        "Allele_counts": from_sync_to_allele_count(ss(line)[3]), }
-    # Initialise the `sfs_idx`.
-    sfs_idx = to_sfs_indices(nchr)
+        # Do not call/include if depth is zero.
+        if int(count) > 0),
+        # Sorting key is allele count.
+        key=lambda tup: tup[1])
 
-    with opener(fin) as f:
-        for line in f:
-            # First of all, check that the reference is unambigous. Otherwise
-            # the `sync_string` will not be parseable, i.e. ".:.:.:.".
-            if str(ss(line)[2]) not in ("A", "T", "C", "G"):
-                continue
-            # Parse its fields.
-            fields = to_fields(line)
-            # If the site is triallelic (more than 2 allele counts), or the site
-            # has missing data (no allele counts), skip the site.
-            if len(fields["Allele_counts"]) not in (1, 2):
-                continue
-            elif len(fields["Allele_counts"]) == 1:
-                nuc, count = fields["Allele_counts"][0]
-                loci["Maj_allele"].append(nuc)
-                loci["Maj_count"].append(nchr)
-                loci["Min_allele"].append("N")
-                loci["Min_count"].append(0)
-            elif len(fields["Allele_counts"]) == 2:
-                (maj_nuc, maj_count), (min_nuc, min_count) = fields["Allele_counts"]
-                min_freq = min_count / (sum([maj_count, min_count]))
-                minor_all_count = to_allele_count(
-                    to_abs_diff(min_freq, sfs_idx))
-                loci["Maj_allele"].append(maj_nuc)
-                loci["Maj_count"].append(int(minor_all_count))
-                loci["Min_allele"].append(min_nuc)
-                loci["Min_count"].append(int(nchr - minor_all_count))
-            # Finally, add the "Chr" and "Pos".
-            loci["Chr"].append(fields["Chr"])
-            loci["Pos"].append(fields["Pos"])
 
-    return sort_loci_dict(loci)
-
-def from_ngsPool_out_to_loci_dict(fin: str, nchr: int,
-                                  lrt_snp_thresh: float=6.64):
+class ParserGenData:
     """
-    Read a file "*ngsPool.out" (possibly gzipped) and convert it to a python
-    dictionary.
+    Parse genomic data. Converts a genomic data file to a python iterable.
+    """
+
+    def __init__(self, filename, func_generator, nchr=None,
+                 lrt_snp_thresh=None):
+
+        self.filename = filename
+        self._func_generator = func_generator
+        if nchr:
+            self.nchr = nchr
+            # Create a list of [0/nchr, 1/nchr, etc. nchr/nchr], which is a
+            # discrete distribution with "nchr + 1" bins of the possible allele
+            # frequencies in an SFS with "nchr" sequences/chromosomes/haploid
+            # samples. It will help in translating continuous allele frequencies
+            # to discrete allele counts.
+            self.sfs_frequencies = [i / nchr for i in range(0, nchr + 1)]
+        if lrt_snp_thresh:
+            self.lrt_snp_thresh = lrt_snp_thresh
+
+        return None
+
+    def __iter__(self):
+        return iter(self._func_generator(self))
+
+    def saf_to_allele_count(self, saf):
+        """
+        Compute the absolute differences between a site allele frequency "saf"
+        and each index within the list "sfs_frequencies".
+        Return a discrete allele count from the starting continuous allele
+        frequency, which is the minimum in a list of absolute differences.
+        """
+
+        abs_diff_list = [abs(saf - i) for i in self.sfs_frequencies]
+        return abs_diff_list.index(min(abs_diff_list))
+
+    @classmethod
+    def from_bed(cls, filename):
+        """
+        Read a BED file and yield pairs of "chromosome" and "site" per row.
+
+        Input
+        -----
+
+        filename : str
+        File input name. Comments and headers within the BED file must start
+        with "#".
+        """
+
+        def generator(self):
+            # Reset counters after each call to the iterable.
+            self.skipped_comment = 0
+
+            with opener(self.filename) as fhandle:
+                for numline, line in enumerate(fhandle):
+                    # Make sure this line is not a header or a comment.
+                    if "#" in line[0]:
+                        self.skipped_comment += 1
+                        continue
+                    line = ss(line)
+                    # Slice the line by the column indices of a BED file.
+                    chr_column, pos_column = 0, 1
+                    try: chromosome, pos = (str(line[chr_column]),
+                                            int(line[pos_column]))
+                    except ValueError as err:
+                        raise err(f"'{pos}' was retrieved as a chromosome"
+                                  + f" position from '{finput}' at line"
+                                  + f" num. '{numline + 1}'. It could"
+                                  + " not be cast as an integer type;"
+                                  + " check if the correct column indice"
+                                  + f" for this data is '{pos_column}' and"
+                                  + " also if there are comments or headers"
+                                  + " which do not start with '#' as their"
+                                  + " first character.")
+                    yield {
+                        "chr": chromosome,
+                        "pos": pos, }
+
+            # Store num. of lines (sites in data) after reaching EOF.
+            self.numsites = numline + 1 - self.skipped_comment
+
+        return cls(filename, generator)
+
+    @classmethod
+    def from_sync(cls, filename, nchr):
+        """
+        Read a SYNC file with POOLED polymorphism data. It can be gzipped or
+        uncompressed. Then, yields a data dictionary for each row.
+
+        Input
+        -----
+
+        filename : str
+        File input name. Comments and headers within the SYNC file must start
+        with "#".
+
+        nchr : int
+        The number of sets of chromosomes in the pool (sequencing depth). It is
+        twice the amount of sequenced individuals for diploid organisms.
+        """
+
+        def generator(self):
+            # Reset counters after each call to the iterable.
+            self.skipped_comment = 0
+            self.skipped_triallelic = 0
+            self.skipped_missing_data = 0
+            self.skipped_ambiguous_ref = 0
+
+            # Start by creating a function which categorises fields.
+            def sync_to_datadict(line):
+                # Split and slice line.
+                ssline = ss(line)
+                # First, check that the reference is unambiguous. Otherwise
+                # the "sync string" will not be parseable, i.e. ".:.:.:.".
+                if str(ssline[2]) not in ("A", "T", "C", "G"):
+                    self.skipped_ambiguous_ref += 1
+                    return None
+                # Locate data by column indice.
+                fields = {
+                    "chr": str(ssline[0]), "pos": int(ssline[1]),
+                    "allele_depths": from_syncstring_to_allele_depths(
+                        ssline[3]),
+                    }
+                # If the site is triallelic (more than 2 allele counts), or the
+                # site has missing data (no allele counts), skip the site.
+                if len(fields["allele_depths"]) > 2:
+                    self.skipped_triallelic += 1
+                    return None
+                # Missing data, all alleles at zero depth.
+                elif len(fields["allele_depths"]) == 0:
+                    self.skipped_missing_data += 1
+                    return None
+                # If there is one allele, yield it as a dictionary.
+                elif len(fields["allele_depths"]) == 1:
+                    nuc, depth = fields["allele_depths"][0]
+                    return {
+                        "chr": fields["chr"],
+                        "pos": fields["pos"],
+                        "maj_allele": nuc,
+                        "maj_depth": depth,
+                        "maj_freq": 1,
+                        "maj_count": self.nchr,
+                        "min_allele": "N",
+                        "min_depth": 0,
+                        "min_freq": 0,
+                        "min_count": 0, }
+                # If there are two alleles (polymorphic sites), yield them as a
+                # dictionary.
+                elif len(fields["allele_depths"]) == 2:
+                    (min_nuc, min_depth), (maj_nuc, maj_depth) = \
+                        fields["allele_depths"]
+                    min_freq = min_depth / (maj_depth + min_depth)
+                    min_count = self.saf_to_allele_count(min_freq)
+                    # For each row in the file "finput", yield a dictionary with
+                    # the data in this row.
+                    return {
+                        "chr": fields["chr"],
+                        "pos": fields["pos"],
+                        "maj_allele": maj_nuc,
+                        "maj_depth": maj_depth,
+                        "maj_freq": float(1 - min_freq),
+                        "maj_count": int(nchr - min_count),
+                        "min_allele": min_nuc,
+                        "min_depth": min_depth,
+                        "min_freq": float(min_freq),
+                        "min_count": int(min_count), }
+
+            # Open the input file.
+            with opener(self.filename) as fhandle:
+                # Read the first lines, which may be comments or a header.
+                line = fhandle.readline()
+                while "#" in line[0]:
+                    self.skipped_comment += 1
+                    line = fhandle.readline()
+                # After the first "#" in lines, start reading data.
+                # Data dictionaries "dd" can be "None" because of missing data;
+                # skip them, do not yield.
+                dd = sync_to_datadict(line)
+                if dd: yield dd
+                for numline, line in enumerate(fhandle):
+                    dd = sync_to_datadict(line)
+                    if dd: yield dd
+
+            # "enumerate" starts at 0, and we process the first line before the
+            # "enumerate" for-loop; we need to add 2 to obtain num. of sites.
+            self.numsites = numline + 2
+
+        return cls(filename, generator, nchr=nchr)
+
+    @classmethod
+    def from_ngsPool(cls, filename, nchr, lrt_snp_thresh: float=6.64):
+        """
+        Read an ngsPool (from ngsJulia) file with POOLED polymorphism data.
+        It can be gzipped or uncompressed. Then, yields a data dictionary for
+        each row.
+
+        Input
+        -----
+
+        filename : str
+        File input name. Comments and headers within the SYNC file must start
+        with "#".
+
+        nchr : int
+        The number of sets of chromosomes in the pool (sequencing depth). It is
+        twice the amount of sequenced individuals for diploid organisms.
+
+        lrt_snp_thresh : float
+        Threshold to call SNPs. See `ngsJulia` documentation.
+        """
+
+        def generator(self):
+            # Reset counters after each call to the iterable.
+            self.skipped_comment = 0
+            self.skipped_below_lrt_snp = 0
+
+            # Start by creating a function which categorises fields.
+            def ngsjulia_to_datadict(line):
+                # Split and slice line.
+                ssline = ss(line)
+                # Locate data by column indice.
+                fields = {
+                    "chr": str(ssline[0]), "pos": int(ssline[1]),
+                    "maj_allele": str(ssline[4]),
+                    "min_allele": str(ssline[5]),
+                    "min_saf_mle": float(ssline[10]),
+                    "lrt_snp": float(ssline[6]), }
+                # If the Likelihood-Ratio-Test (LRT) for the SNP is higher than
+                # the threshold, accept the hypothesis that this loci is
+                # polymorphic (see ngsJulia docs).
+                if fields["lrt_snp"] > self.lrt_snp_thresh:
+                    min_freq = fields["min_saf_mle"]
+                    min_count = self.saf_to_allele_count(min_freq)
+                    min_nuc = fields["min_allele"]
+                # Otherwise, below the threshold the loci is monomorphic.
+                else:
+                    # Counter of loci with maximum likelihood estimate "mle" of
+                    # site allele frequency "saf" above zero which have been
+                    # rejected by lrt threshold.
+                    if fields["min_saf_mle"] > 0.0:
+                        self.skipped_below_lrt_snp += 1
+                    min_freq = 0
+                    min_count = 0
+                    min_nuc = "N"
+                # Return the datadict created from the ngsjulia line.
+                return {
+                    "chr": fields["chr"],
+                    "pos": fields["pos"],
+                    "maj_allele": fields["maj_allele"],
+                    "maj_depth": None,
+                    "maj_freq": float(1 - min_freq),
+                    "maj_count": int(nchr - min_count),
+                    "min_allele": min_nuc,
+                    "min_depth": None,
+                    "min_freq": min_freq,
+                    "min_count": min_count, }
+
+            # Open the input file.
+            with opener(self.filename) as fhandle:
+                # Read the first lines, which may be comments or a header.
+                line = fhandle.readline()
+                while "#" in line[0]:
+                    self.skipped_comment += 1
+                    line = fhandle.readline()
+                # After the first "#" in lines, start reading data.
+                yield ngsjulia_to_datadict(line)
+                for numline, line in enumerate(fhandle):
+                    yield ngsjulia_to_datadict(line)
+
+            # "enumerate" starts at 0, and we process the first line before the
+            # "enumerate" for-loop; we need to add 2 to obtain num. of sites.
+            self.numsites = numline + 2
+
+        return cls(filename, generator, nchr=nchr,
+                   lrt_snp_thresh=lrt_snp_thresh)
+
+    def populate_new_sqlite_table(self, tblname: str, db_sqlite: str):
+        """
+        Create a new sqlite3 table and populate it with the values parsed from
+        this instance.
+
+        Input
+        -----
+
+        tblname : str
+        Name of the newly created table within the sqlite database file.
+    
+        db_sqlite : str
+        File name of the sqlite database which this function will write to.
+        """
+
+        # Open a connection and a cursor to the sqlite database.
+        con = sqlite3.connect(db_sqlite)
+        cur = con.cursor()
+        generator = iter(self)
+        # Take a look at the fields/columns returned by the generator.
+        first_row = next(generator)
+        # Make sure they include required "chromosome" and "pos" fields.
+        if "chr" not in first_row.keys() or "pos" not in first_row.keys():
+            raise Exception("'Generator' from input file does not have"
+                            + " 'chr' or 'pos' fields.")
+        # Try to avoid SQL injections by sanitizing input.
+        [sanitized_sqlite(param) for param in (tblname, *first_row.keys())]
+        # Create a table with the name "tblname" and the fields/columns in
+        # "first_row.keys()".
+        cur.execute(f"CREATE TABLE {tblname} ("
+                    + ", ".join(first_row.keys()) + ", "
+                    + " PRIMARY KEY(chr, pos) )")
+        # Create a command to insert data in the sqlite table.
+        command_insert_sqlite = str(
+            f"INSERT INTO {tblname} VALUES ("
+            + ", ".join([":" + key for key in first_row.keys()]) + ")")
+        # Add the data in "first_row" to the newly created table.
+        cur.execute(command_insert_sqlite, first_row)
+        # Add the data of the rest of the generator.
+        for row in generator:
+            cur.execute(command_insert_sqlite, row)
+        # Commit these INSERT changes.
+        con.commit()
+    
+        return None
+
+def select_shared_loci(db_sqlite: str):
+    """
+    Open an sqlite3 database and select the inner join (shared or intersection
+    of sites) of all of its tables.
 
     Input
     -----
 
-    fin : str
-    The path/filename to an "*.ngsPool.out" file, either uncompressed or
-    gzipped.
-
-    nchr : int
-    The number of sets of chromosomes. It is twice the amount of individuals for
-    diploid organisms.
-
-    lrt_snp_thresh : float
-    Threshold to call SNPs. See `ngsJulia` documentation.
-
-    Output
-    ------
-
-    A dictionary which stores "chr", "pos", "alleles" and "allele counts".
+    db_sqlite : str
+    File name of the sqlite database which this function will read from.
     """
 
-    # Initialise the output dictionary. Monomorphisms will be stored as
-    # "Min_allele": "N", "Min_count": 0.
-    loci = {"Chr": [], "Pos": [], "Maj_allele": [], "Min_allele": [],
-            # Counts of allele1 (NA1, major) and allele2 (NA2, minor).
-            "Maj_count": [], "Min_count": [], }
-    # Create a local function that splits the rows of the input file.
-    ss = lambda line: line.strip("\n").split()
-    # Create a function which categorises the fields of a given line.
-    to_fields = lambda line: {
-        "Chr": str(ss(line)[0]), "Pos": int(ss(line)[1]),
-        "Maj_allele": str(ss(line)[4]), "Min_allele": str(ss(line)[5]),
-        "Minor_saf_mle": float(ss(line)[10]), "lrt_snp": float(ss(line)[6]), }
-    # Initialise the `sfs_idx`.
-    sfs_idx = to_sfs_indices(nchr)
+    # Open a connection and a cursor to the sqlite database.
+    con = sqlite3.connect(db_sqlite)
+    cur = con.cursor()
+    # Get a list of all the tables within "db_sqlite".
+    db_tblnames = cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")
+    # It returns an sqlite.Cursor (iterable of tuples with a single item "name")
+    # which must be cast into a list.
+    db_tblnames = [tup[0] for tup in db_tblnames]
+    # Select an inner join of all the tables, equivalent to sites/loci shared
+    # across all files/tables.
+    command_intersection_sqlite = str(
+        "SELECT ROW_NUMBER() OVER(ORDER BY chr, pos), *"
+        + f" FROM {db_tblnames[0]} "
+        + " ".join(["INNER JOIN " + t + " USING (chr, pos)"
+                    for t in db_tblnames[1:]])
+    )
+    # Execute the command.
+    # The selected rows with polymorphism data are stored in "res".
+    db_res = cur.execute(command_intersection_sqlite)
 
-    with opener(fin) as f:
-        # Read the first line, which may be a header.
-        line = f.readline()
-        # If it is a header, skip it. If it is not a header, append it.
-        if not "##chromosome" in line:
-            # Parse its fields.
-            fields = to_fields(line)
-            # Append fields to the lists of a dict.
-            loci["Chr"].append(fields["Chr"])
-            loci["Pos"].append(fields["Pos"])
-            loci["Min_allele"].append(fields["Min_allele"])
-            loci["Maj_allele"].append(fields["Maj_allele"])
-            # Compute the minor allele count from minor allele freq.
-            if fields["lrt_snp"] > lrt_snp_thresh:
-                minor_all_count = to_allele_count(
-                    to_abs_diff(fields["Minor_saf_mle"], sfs_idx))
-            else:
-                minor_all_count = 0
-            # Set minor and then major allele counts.
-            loci["Min_count"].append(int(minor_all_count))
-            loci["Maj_count"].append(int(nchr - minor_all_count))
+    return db_res, db_tblnames
 
-        # Repeat the same procedure for the rest of the file lines after the
-        # first one.
-        for line in f:
-            # Parse its fields.
-            fields = to_fields(line)
-            # Append fields to the lists of a dict.
-            loci["Chr"].append(fields["Chr"])
-            loci["Pos"].append(fields["Pos"])
-            loci["Min_allele"].append(fields["Min_allele"])
-            loci["Maj_allele"].append(fields["Maj_allele"])
-            # Compute the minor allele count from minor allele freq.
-            if fields["lrt_snp"] > lrt_snp_thresh:
-                minor_all_count = to_allele_count(
-                    to_abs_diff(fields["Minor_saf_mle"], sfs_idx))
-            else:
-                minor_all_count = 0
-            # Set minor and then major allele counts.
-            loci["Min_count"].append(int(minor_all_count))
-            loci["Maj_count"].append(int(nchr - minor_all_count))
-
-    return sort_loci_dict(loci)
-
-def shared_sites_loci_dict(*loci_dicts: dict, intersect_sites: set=None):
+def select_median(colname: str, tblname: str, db_sqlite: str):
     """
-    Find the intersection between multiple `loci` dictionaries.
+    Returns the median of a numeric column in a sqlite3 database.
     """
 
-    # If there is a single dict, it is trivial to compute shared sites.
-    if len(loci_dicts) == 1:
-        raise UserWarning("A single `loci_dict` was provided; to find shared"
-                          + " sites at least a pair (or more) must be"
-                          + " provided.")
-    # Local function to get a set of sites from a `loci_dict`.
-    get_sites = lambda loci: set({(crm, pos)
-                                  for crm, pos in zip(
-                                      loci["Chr"], loci["Pos"])})
-    # Get the sites from the first `loci_dict`.
-    sites = get_sites(loci_dicts[0])
-    # Get the intersection between the first `loci_dict` and all the following
-    # `loci_dict`. At the end we will obtain an intersection of all files.
-    for loci in loci_dicts[1:]:
-        # Get the intersection between already intersected sites and next sites.
-        sites = sites.intersection(get_sites(loci))
+    # Open a connection and a cursor to the sqlite database.
+    con = sqlite3.connect(db_sqlite)
+    cur = con.cursor()
+    # Try to avoid SQL injections by sanitizing input.
+    [sanitized_sqlite(param) for param in (tblname, colname)]
 
-    # If they also inputted some `intersect_sites`, find this intersection.
-    if intersect_sites:
-        sites = sites.intersection(intersect_sites)
+    command_median = str(
+        "SELECT AVG(x) FROM"
+        + f" (SELECT {colname} AS x FROM {tblname} ORDER BY x"
+        + f" LIMIT 2 - (SELECT COUNT(*) FROM {tblname}) % 2"
+        + f" OFFSET (SELECT (COUNT(*) - 1) / 2 FROM {tblname}))"
+    )
+    median = cur.execute(command_median)
 
-    # Check that there is at least a single match.
-    if len(sites) == 0:
-        raise UserWarning("There are no matching sites between ALL of the"
-                          + " queried files.")
-    # Now, filter all of the `loci_dict` using these shared sites.
-    answer = list()
-    for loci in loci_dicts:
-        sorted_and_filtered_loci = sort_loci_dict(loci, sites)
-        answer.append(sorted_and_filtered_loci)
+    # "median" is an iterable of tuples (database query); return only the first
+    # item of the first tuple (a number).
+    return float(median.fetchone()[0])
 
-    return answer
-
-def equal_length_dict_values(*dicts: dict):
+def select_average(colname: str, tblname: str, db_sqlite: str):
     """
-    Given a dictionary where all of its values are lists, check that all lists
-    are of the same length.
+    Returns the average of a numeric column in a sqlite3 database.
     """
 
-    agglutinative_set = set()
-    for d in dicts:
-        agglutinative_set = agglutinative_set.union(
-            set([len(l) for l in d.values()]))
+    # Open a connection and a cursor to the sqlite database.
+    con = sqlite3.connect(db_sqlite)
+    cur = con.cursor()
+    # Try to avoid SQL injections by sanitizing input.
+    [sanitized_sqlite(param) for param in (tblname, colname)]
 
-    if len(agglutinative_set) == 1: return agglutinative_set.pop()
-    else: raise UserWarning("The given files may"
-                            + " be of different lengths"
-                            + " (number of rows); make sure"
-                            + " the sites have one-to-one"
-                            + " correspondence.")
+    command_average = str(f"SELECT AVG({colname}) FROM {tblname}")
+    average = cur.execute(command_average)
 
-def from_loci_dict_to_moments_dict(loci_dicts: list, pop_labels: list):
+    # "average" is an iterable of tuples (database query); return only the first
+    # item of the first tuple (a number).
+    return float(average.fetchone()[0])
+
+def select_average_expected_heterozygosity(tblname: str, db_sqlite: str,
+                                           colname_minfreq: str="min_freq"):
     """
-    Builds a data dict with the `moments` or `dadi` format, which is the
-    following:
+    Returns the average across all sites of the expected heterozygosity
+    (as in Nei's genetic diversity estimator).
+    """
 
+    # Open a connection and a cursor to the sqlite database.
+    con = sqlite3.connect(db_sqlite)
+    cur = con.cursor()
+    # Try to avoid SQL injections by sanitizing input.
+    [sanitized_sqlite(param) for param in (tblname, colname_minfreq)]
+
+    command_average_expected_heterozygosity = str(
+        "SELECT SUM(heteroz) / COUNT(heteroz) FROM ("
+            + "SELECT 1 - (x * x) - ((1 - x) * (1 - x)) AS heteroz FROM ("
+                + f"SELECT {colname_minfreq} AS x FROM {tblname}))"
+    )
+    avg_exp_hetero = cur.execute(command_average_expected_heterozygosity)
+
+    # "avg_exp_hetero" is an iterable of tuples (database query); return only
+    # the first item of the first tuple (a number).
+    return float(avg_exp_hetero.fetchone()[0])
+
+def from_dbrow_to_moments_dd(db_row, pop_labels):
+    """
+    Convert a row from a database created with the method
+    "ParserGenData.populate_new_sqlite_table" into a moments data dictionary.
+    """
+
+    # (chr, pos) in the second and third fields of "db_row".
+    site = tuple(db_row[1:3])
+    # Compute and store the length of "db_row".
+    len_dbrow = len(db_row)
+    # Major allele in the fourth field "3", which repeats every eight (for the
+    # rest of the populations).
+    maj_alleles = tuple([str(db_row[i]) for i in range(3, len_dbrow, 8)])
+    # Minor allele in the eighth field "7", and repeats every eight.
+    min_alleles = tuple([str(db_row[i]) for i in range(7, len_dbrow, 8)])
+    # Obtain all of the observed alleles at this site.
+    alleles = list(set([a for a in maj_alleles + min_alleles
+                        if a != "N"]))
+    # If the site is triallelic, skip it (return None).
+    if len(alleles) > 2: return None
+    # If the site is monomorphic, add an ambiguous nucleotide for formatting
+    # reasons.
+    if len(alleles) == 1:
+        alleles = (alleles[0], "N")
+    # Major allele counts in the seventh field "6", and repeats every eight.
+    maj_counts = tuple([int(db_row[i]) for i in range(6, len_dbrow, 8)])
+    # Minor allele counts in the eleventh field "10", and repeats every eight.
+    min_counts = tuple([int(db_row[i]) for i in range(10, len_dbrow, 8)])
+    # Compute calls for each population.
+    calls = {
+        pop_lab:
+        (maj_count, min_count) if maj_allele == alleles[0]
+        else (min_count, maj_count)
+        for pop_lab, maj_allele, maj_count, min_count in zip(
+                pop_labels, maj_alleles, maj_counts, min_counts)
+        }
     data_dict = {
-     ('chr', 'pos'): {
-        'context': '---',
-        'outgroup_context': '---',
-        'outgroup_allele': '-',
-        'segregating': ('nuc1', 'nuc2'),
-        'calls': {'label-pop1': (nuc1, nuc2),
-                  'label-pop2': (nuc1, nuc2),
-                  ...} }
-     ('chr', 'pos'): { ... }
-     ...
-    }
-
-    "Context", "outgroup context" and "outgroup allele" are left in blank (unset
-    or unknown, as in a folded SFS).
-    """
-
-    # Initialise the output dictionary.
-    moments_dd = dict()
-    # Make sure all of the input `dicts` are sorted by ("Chr", "Pos").
-    loci_dicts = [sort_loci_dict(d) for d in loci_dicts]
-
-    # For all the loci (sites) in the input dicts...
-    for idx_locus in range(equal_length_dict_values(*loci_dicts)):
-        # Check that the locus at `idx_locus` is found at the same ("Chr",
-        # "Pos") across all dicts.
-        sites = set([(d["Chr"][idx_locus], d["Pos"][idx_locus])
-                     for d in loci_dicts])
-        if len(sites) > 1:
-            raise UserWarning("The input files do not have one-to-one"
-                              + " correspondence.")
-        # Pop out the only site in sites of len == 1.
-        else: site = sites.pop()
-        # Obtain alleles zipped with their counts.
-        alleles = [(d["Min_allele"][idx_locus],
-                    d["Min_count"][idx_locus]) for d in loci_dicts]
-        alleles.extend([(d["Maj_allele"][idx_locus],
-                         d["Maj_count"][idx_locus]) for d in loci_dicts])
-        # Filter out alleles with zero counts (these may be errors).
-        alleles = list(filter(lambda a: a[1] > 0, alleles))
-        alleles_nucleotides = list(set([a[0] for a in alleles]))
-        # If there are more than two alleles, this is a triallelic site. Skip
-        # it and warn.
-        if len(alleles_nucleotides) > 2:
-            print("WARNING: Skipping triallelic site at", site,
-                  "with inferred alleles", alleles_nucleotides)
-            continue
-
-        # Create an entry for the output dictionary.
-        locus = {
-            # Outgroup information is not available.
             "context": "---",
             "outgroup_context": "---",
             "outgroup_allele": "-",
-            "segregating": tuple(alleles_nucleotides)
-                if len(alleles_nucleotides) == 2
-                else (alleles_nucleotides[0], "N"),
-            "calls": dict(), }
+            "segregating": alleles,
+            "calls": calls, }
 
-        # Append "calls" for each input/population dict.
-        for d, label in zip(loci_dicts, pop_labels):
-            if d["Maj_allele"][idx_locus] == alleles_nucleotides[0] or \
-                    d["Min_allele"][idx_locus] == alleles_nucleotides[1]:
-                locus["calls"][label] = (d["Maj_count"][idx_locus],
-                                         d["Min_count"][idx_locus])
+    return site, data_dict
 
-            elif d["Maj_allele"][idx_locus] == alleles_nucleotides[1] or \
-                    d["Min_allele"][idx_locus] == alleles_nucleotides[1]:
-                locus["calls"][label] = (d["Maj_count"][idx_locus],
-                                         d["Min_count"][idx_locus])
-
-            else:
-                print(alleles_nucleotides)
-                print(d["Allele2"][i], d["Allele1"][i])
-                raise UserWarning("One allele did not match?")
-        # Append this locus to `moments_dd`.
-        moments_dd[site] = locus
-
-    return moments_dd
-
-def build_moments_data_dict(fins: list, pop_labels: list, nchroms: list,
-                            intersect_sites: str=None, ):
+def combinations_populations(pop_labels: list):
     """
-    Build a `moments` data dict, a dict which represents a multidimensional SFS.
-
-    Input
-    -----
-
-    fins : list
-    A list of input filenames.
-
-    pop_labels : list
-    A list of population labels which will be zipped with the list of input
-    filenames.
-
-    nchroms : list
-    A list with the num. of chrs. which will be zipped with the list of input
-    filenames. It will define the highest index of the SFS.
-
-    intersect_sites : str
-    A filename that directs to a BED-like file with coordinates arranged as
-    "chr" in first and "pos" in second columns.
+    Compute possible combinations of a single or a pair of populations, in order
+    to compute all possible 1D and 2D SFS.
     """
 
-    # Read the provided files in `fins`.
-    loci_dicts = list()
-    for fin, nchr in zip(fins, nchroms):
-        # Read if it is a SYNC file.
-        if "sync" in fin:
-            print("INFO: Reading the file `"
-                  + str(fin) + "` as a SYNC file.")
-            loci = from_sync_to_loci_dict(fin, nchr)
-            loci_dicts.append(loci)
-        # Read if it is an ngsPool file from ngsJulia.
-        elif "out" in fin or "ngsPool" in fin:
-            print("INFO: Reading the file `"
-                  + str(fin) + "` as an ngsPool file from ngsJulia.")
-            loci = from_ngsPool_out_to_loci_dict(fin, nchr)
-            loci_dicts.append(loci)
+    def combine(arr):
+        if len(arr) == 0: return [[]]
+        combs = []
+        for c in combine(arr[1:]):
+            combs += [c, c + [arr[0]]]
+        return combs
+    # Only combinations of one or two items (pops) allowed.
+    pop_combinations = [c for c in combine(pop_labels)
+                        if len(c) == 1 or len(c) == 2]
+
+    return {tuple(combo): list() for combo in pop_combinations}
+
+def from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom):
+    """
+    Modifies in place "sfs_dict" by adding information from sites in
+    "moments_dd".
+    """
+
+    for poplabs in sfs_dict.keys():
+        # Now, "moments_dd" has all of the provided population calling data.
+        # Filter the pop. ids. we are interested in.
+        filtered_moments_dd = dict()
+        for site, data in moments_dd.items():
+            filtered_calls = {pl: calls
+                              for pl, calls in data["calls"].items()
+                              if pl in poplabs}
+
+            filtered_moments_dd[site] = data.copy()
+            filtered_moments_dd[site]["calls"] = filtered_calls
+
+        # From the filtered "moments_dd" create an SFS and append it to the
+        # "sfs_dict" dictionary with the key "poplabs".
+        sfs_dict[poplabs].append(
+            moments.Spectrum.from_data_dict(
+                filtered_moments_dd, pop_ids=poplabs,
+                projections=[int(poplab_to_nchrom[pl]) for pl in poplabs],
+                mask_corners=False, polarized=False))
+        # Summing the sites of a pair of SFS into a single SFS.
+        # It reduces the amount of data in memory.
+        sfs_dict[poplabs] = [sum(sfs_dict[poplabs])]
+
+    return None
+
+def write_stats(parser, stats_dict, poplabel, db_sqlite):
+    """
+    parser : instance of ParserGenData
+    """
+
+    if not stats_dict:
+        # Initialize a dictionary to store "stats_dict" regarding the analysis.
+        stats_dict = {
+            "poplabel": list(),
+            "sites_total": list(),
+            # Included sites are all lines with data minus skipped lines, which
+            # are "None" for the ngsPool and BED parsers; only applicable to
+            # sync files.
+            "sites_included": list(),
+            "skipped_comment": list(),
+            "sites_skipped_ambiguous_ref": list(),
+            "sites_skipped_missing_data": list(),
+            "sites_skipped_triallelic": list(),
+            # ngsPool does not represent "depth", only "frequency" directly.
+            "median_depth": list(),
+            "mean_depth": list(),
+            "average_expected_heterozygosity": list(),
+        }
+
+    # Append stats_dict to these lists.
+    stats_dict["poplabel"].append(poplabel)
+    stats_dict["sites_total"].append(parser.numsites)
+    # The sync parser has more stats_dict than the ngspool, which does not
+    # consider triallelic or missing data sites.
+    try:
+        stats_dict["sites_included"].append(
+                parser.numsites - (parser.skipped_ambiguous_ref
+                    + parser.skipped_missing_data + parser.skipped_triallelic)
+            )
+    except: stats_dict["sites_included"].append(parser.numsites)
+    stats_dict["skipped_comment"].append(parser.skipped_comment)
+    try: stats_dict["sites_skipped_ambiguous_ref"].append(
+            parser.skipped_ambiguous_ref)
+    except: stats_dict["sites_skipped_ambiguous_ref"].append(None)
+    try: stats_dict["sites_skipped_missing_data"].append(
+        parser.skipped_missing_data)
+    except: stats_dict["sites_skipped_missing_data"].append(None)
+    try: stats_dict["sites_skipped_triallelic"].append(
+        parser.skipped_triallelic)
+    except: stats_dict["sites_skipped_triallelic"].append(None)
+    try:
+        stats_dict["median_depth"].append(
+            select_median("maj_depth+min_depth", poplabel, db_sqlite))
+    except: stats_dict["median_depth"].append(None)
+    try:
+        stats_dict["mean_depth"].append(
+            select_average("maj_depth+min_depth", poplabel, db_sqlite))
+    except: stats_dict["mean_depth"].append(None)
+    try:
+        stats_dict["average_expected_heterozygosity"].append(
+            select_average_expected_heterozygosity(poplabel, db_sqlite))
+    except: stats_dict["average_expected_heterozygosity"].append(None)
+
+    return stats_dict
+
+def main(finputs: list, pop_labels:list, nchroms: list,
+         intersect_sites: str=None):
+    """
+    Create multiple "moments.Spectrum" from a list of input files with variant
+    call data.
+    """
+
+    # Associate pop. labels with their num. of chr.
+    poplab_to_nchrom = dict()
+    for pl, nc in zip(pop_labels, nchroms):
+        poplab_to_nchrom[str(pl)] = int(nc)
+
+    # Initialize combinations of pop. labels. An SFS will be computed for each
+    # single population and pair of populations.
+    sfs_dict = combinations_populations(pop_labels)
+    amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
+    amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
+    print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
+        amount_sfs_onedim, amount_sfs_bidim))
+
+    # Tell which files will be read as SYNC or ngsPool. Raise an Exception if
+    # any extension does not match the expected formats.
+    for fi in finputs:
+        if "sync" in str(fi).lower():
+            print(f"INFO: Detected that '{fi}' is a SYNC-formatted file.")
+        elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
+            print(f"INFO: Detected that '{fi}' is an ngsPool-formatted"
+                  + " file.")
         else:
-            raise UserWarning("The file `" + str(fin) + "` has neither"
-                              + " 'sync', 'out' nor 'ngsPool' extensions.")
+            raise Exception("Could not detect the correct file"
+                            + f" extension for '{fi}'; accepts"
+                            + " 'sync' for SYNC files and"
+                            + " 'out' or 'ngsPool' for ngsPool files"
+                            + " (either lower or upper case).")
 
-    # Read the intersecting files, if provided.
+    # Check that the three lists in parameters are of the same length; each
+    # input filename must also have a pop. label and a n. of chrom.
+    if len(finputs) != len(pop_labels) or len(finputs) != len(nchroms):
+        raise Exception("The lists of file inputs, pop. labels and num."
+                        + " of chromosomes must be of the same length.")
+
+    # Create a temporary file where an sqlite3 database will be stored.
+    # Avoid using the directory/partition "/tmp", because the database file
+    # could become too big to fit within there. Instead, place this file in the
+    # home directory.
+    home = pathlib.Path.home()
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=home, prefix="ephemeral.tmp", suffix=".sqlite3")
+    print("INFO: Storing an sqlite3 database with the polymorphism data"
+          + f" in a temporary file at '{temp_file.name}'.")
+
+    # Initialize a "stats" dictionary for storing num. of sites and other
+    # information of the input files.
+    stats = dict()
+
+    # Create a table within the database for each input file.
+    for fi, nc, pl in zip(finputs, nchroms, pop_labels):
+        print(f"INFO: Reading '{fi}' and writing data to database.")
+        # Try to match a "sync", "ngspool" or "out" extension.
+
+        if "sync" in str(fi).lower():
+            parser = ParserGenData.from_sync(fi, nc)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
+            # Compute stats of this data file.
+            stats = write_stats(parser, stats, pl, temp_file.name)
+            # Print these stats.
+            for key, vals in stats.items():
+                print("        * {}: {}".format(key, vals[-1]))
+
+        elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
+            parser = ParserGenData.from_ngsPool(fi, nc)
+            parser.populate_new_sqlite_table(pl, temp_file.name)
+            # Compute stats of this data file.
+            stats = write_stats(parser, stats, pl, temp_file.name)
+            # Print these stats.
+            for key, vals in stats.items():
+                print("        * {}: {}".format(key, vals[-1]))
+
     if intersect_sites:
-        print("INFO: Reading the given bed-like coordinates.")
-        intersect_sites = read_bedlike_sites(intersect_sites)
-        print("INFO: Finding the intersection between files"
-              + " and the provided `intersect_sites`.")
-    else:
-        print("INFO: Finding the intersection between files.")
+        print(f"INFO: Reading the BED '{intersect_sites}'"
+              + " with intersecting sites.")
+        parser = ParserGenData.from_bed(intersect_sites)
+        # Remove directory and extensions from the filename so it can be used as
+        # a table name.
+        intersect_tblname = os.path.split(intersect_sites)[1].split(".")[0]
+        parser.populate_new_sqlite_table(intersect_tblname, temp_file.name)
+        # Compute stats of this data file.
+        stats = write_stats(parser, stats, "INTERSECT.BED", None)
+        # Print these stats.
+        for key, vals in stats.items():
+            print("        * {}: {}".format(key, vals[-1]))
 
-    # Make sure all of the input files contain the same loci.
-    loci_dicts = shared_sites_loci_dict(*loci_dicts,
-                                        intersect_sites=intersect_sites)
+    print("INFO: Finished reading input data.")
 
-    # Build the moments data dict.
-    print("INFO: Building the `moments` data dict.")
-    moments_dd = from_loci_dict_to_moments_dict(loci_dicts, pop_labels)
+    print("INFO: Executing the inner join of the database with the columns"
+          + " 'chromosome' and 'pos' (finding sites shared across"
+          + " all of the given files).")
+    db_res, db_tblnames = select_shared_loci(temp_file.name)
 
-    return moments_dd
+    # Remove the "intersect_tblname" from "db_tblnames".
+    if intersect_sites:
+        db_tblnames = db_tblnames[:-1]
+    if list(pop_labels) != list(db_tblnames):
+        print("WARNING: Unexpected order for the columns of the database.")
+        print("DEBUG:", pop_labels, db_tblnames)
 
-def distance_thin(moments_dd: dict, pop_label: str, unlinked_distance: int):
-    """
-    Iterate across loci in a moments' "data_dict" to make sure that all
-    polymorphisms are further away than "unlinked_distance". If two
-    polymorphisms are too close-by, one of them will be removed from the output
-    list of loci.
+    print("INFO: Creating 'moments' SFS from the inner join of the"
+          + " input polymorphism calling data.")
 
-    Input
-    -----
+    # Initialize vars before loop.
+    moments_dd = dict()
+    skipped_triallelic = 0
+    # Start iterating through sites found within the intersection (iterate
+    # across sites shared across all files).
+    for db_row in db_res:
+        site, data_dict = from_dbrow_to_moments_dd(db_row, pop_labels)
+        if not data_dict:
+            print("WARNING: Triallelic site in the shared sites.")
+            skipped_triallelic += 1
+        moments_dd[site] = data_dict
+        # Avoid loading into memory all of the sites at once. When the loop
+        # reaches the 100 000th site, convert this data into SFS. Repeat the
+        # process and sum the vectors or matrices (1D or 2D SFS) converted at
+        # each step.
+        row_num = db_row[0]
+        if row_num % 100000 == 0:
+            print(f"INFO: Reached {row_num} sites.")
 
-    moments_dd : dict
-    Output from "from_loci_dict_to_moments_dict".
+            # Compute SFS for the keys (pair or single pop.) in
+            # "sfs_dict.keys()".
+            from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
-    pop_label : str
-    Population label within the "calls" key of the aforementioned "moments_dd".
+    # Finally, add the remaining sites in "moments_dd" if the amount of sites
+    # was not exactly modulo 100 000:
+    print(f"INFO: Reached the end at {row_num} sites.")
+    if moments_dd:
+        from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
-    unlinked_distance : int
-    The distance presumed to be enough for two loci to be unlinked (with
-    independent recombination).
+    # Append stats.
+    for key in stats.keys():
+        if key == "poplabel":
+            stats[key].append("DB-INNER-JOIN")
+        elif key == "sites_total":
+            stats[key].append(row_num)
+        elif key == "sites_skipped_triallelic":
+            stats[key].append(skipped_triallelic)
+        elif key == "sites_included":
+            stats[key].append(row_num - skipped_triallelic)
+        else:
+            stats[key].append(None)
+    # Print these stats.
+    for key, vals in stats.items():
+        print("        * {}: {}".format(key, vals[-1]))
 
-    Output
-    ------
-
-    A "moments_dd" with loci at enough distance for them to be assumed unlinked.
-    """
-
-    unlinked_moments_dd = dict()
-    last_sequid = 0
-    last_pos = 0
-
-    for locus, data in moments_dd.items():
-        # Find polymorphic sites (both alleles are at freq. > 0).
-        if 0 not in data["calls"][pop_label] and (
-                # Moreover, either the last and present sites are in different
-                # sequids/chrs. and thus they are unlinked...
-                last_sequid != locus[0] or
-                # ...Otherwise, the distance within the sequid is big enough.
-                last_pos + unlinked_distance <= locus[1]):
-            # Add the sites which pass both tests.
-            unlinked_moments_dd[locus] = data
-            # Update last sequid and last pos.
-            last_sequid, last_pos = locus
-
-    return unlinked_moments_dd
-
-def remove_monomorphic_sites(moments_dd: dict):
-    """
-    Removes sites where all populations have a monomorphism.
-    """
-
-    polym_moments_dd = dict()
-
-    for locus, data in moments_dd.items():
-        # Monomorphisms are composed of a segregating 'ATGC' and an 'N'.
-        # So, if it is not a monomorphism, keep it in the filtered dict.
-        if "N" not in data["segregating"]:
-            polym_moments_dd[locus] = data
-
-    return polym_moments_dd
-
-def bootstrap(moments_dd: dict, n_loci: int, n_pseudoreps: int):
-    """
-    Create a list of pseudoreplicate `moments_dd` by randomly sampling subsets.
-
-    Input
-    -----
-
-    moments_dd : dict
-    Output from "from_loci_dict_to_moments_dict".
-
-    n_loci : int
-    asd
-
-    n_pseudoreps : int
-    asd
-
-    Output
-    ------
-
-    A list of pseudoreplicates obtained by subsampling.
-    """
-
-    # Initialise a list of data-dicts which will be returned.
-    pseudoreplicates = list()
-    loci_available = [locus for locus in moments_dd.keys()]
-    if len(loci_available) <= n_loci:
-        print("WARNING: Amount of loci requested per pseudoreplicate is"
-              + " higher than or equal to the amount of loci in the"
-              + " original dataset.")
-        print("WARNING: Num. of loci in the original dataset:"
-              f" {len(loci_available)}")
-        print("WARNING: Num. of loci requested per pseudoreplicate:"
-              f" {n_loci}")
-
-    for _ in range(n_pseudoreps):
-        # Create each instance of a pseudoreplicate.
-        pseudorep_moments_dd = dict()
-        loci_sampled_with_replacement = [
-            # Randomly draw as many as "n_loci" loci.
-            random.choice(loci_available) for _ in range(n_loci)]
-        # Due to the fact that the keys of a dict. cannot be duplicated, and the
-        # same site may be sampled more than once, assign the loci an arbitrary "i"
-        # key.
-        for i in range(len(loci_sampled_with_replacement)):
-            seq, pos = loci_sampled_with_replacement[i]
-            # Keys are made up of "seq" and "pos", but also the arbitrary "i".
-            pseudorep_moments_dd[(seq, pos, i)] = moments_dd[seq, pos]
-        # Append this pseudoreplicate to a list.
-        pseudoreplicates.append(pseudorep_moments_dd)
-
-    return pseudoreplicates
-
-
-if __name__ == '__main__':
-    # This module might be easier to test and debug through the script
-    # '__main__.py'.
-    import pprint
-
-    # Input strings must be formatted as "label=nchr=file-input".
-    pop_labels = [arg.split("=")[0] for arg in sys.argv[1:]]
-    nchroms = [int(arg.split("=")[1]) for arg in sys.argv[1:]]
-    fins = [arg.split("=")[2] for arg in sys.argv[1:]]
-
-    moments_dd = build_moments_data_dict(fins, pop_labels, nchroms)
-    pprint.pprint(moments_dd)
-
-    bootstrapped_moments_dd = bootstrap(moments_dd,
-                                        n_loci=int(len(moments_dd)/2),
-                                        n_pseudoreps=3)
-    pprint.pprint(bootstrapped_moments_dd)
+    # Return all of the SFS. Remember to remove the temporary list the SFS are
+    # in (i.e. slice and return the first item).
+    return {key: val[0] for key, val in sfs_dict.items()}, stats
 
