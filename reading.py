@@ -1,9 +1,9 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# reading_v3.py
+# reading.py (v3)
 #
-# 06 d’abr. 2025  <adria@molevol-OptiPlex-9020>
+# 20 de des. 2024  <adria@molevol-OptiPlex-9020>
 
 help_msg = """
 Module responsible for reading input files with called polymorphisms from
