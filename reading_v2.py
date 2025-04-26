@@ -575,6 +575,66 @@ def from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom):
 
     return None
 
+def write_stats(parser, stats_dict, poplabel, db_sqlite):
+    """
+    parser : instance of ParserGenData
+    """
+
+    if not stats_dict:
+        # Initialize a dictionary to store "stats_dict" regarding the analysis.
+        stats_dict = {
+            "poplabel": list(),
+            "sites_total": list(),
+            # Included sites are all lines with data minus skipped lines, which
+            # are "None" for the ngsPool and BED parsers; only applicable to
+            # sync files.
+            "sites_included": list(),
+            "skipped_comment": list(),
+            "sites_skipped_ambiguous_ref": list(),
+            "sites_skipped_missing_data": list(),
+            "sites_skipped_triallelic": list(),
+            # ngsPool does not represent "depth", only "frequency" directly.
+            "median_depth": list(),
+            "mean_depth": list(),
+            "average_expected_heterozygosity": list(),
+        }
+
+    # Append stats_dict to these lists.
+    stats_dict["poplabel"].append(poplabel)
+    stats_dict["sites_total"].append(parser.numsites)
+    # The sync parser has more stats_dict than the ngspool, which does not
+    # consider triallelic or missing data sites.
+    try:
+        stats_dict["sites_included"].append(
+                parser.numsites - (parser.skipped_ambiguous_ref
+                    + parser.skipped_missing_data + parser.skipped_triallelic)
+            )
+    except: stats_dict["sites_included"].append(parser.numsites)
+    stats_dict["skipped_comment"].append(parser.skipped_comment)
+    try: stats_dict["sites_skipped_ambiguous_ref"].append(
+            parser.skipped_ambiguous_ref)
+    except: stats_dict["sites_skipped_ambiguous_ref"].append(None)
+    try: stats_dict["sites_skipped_missing_data"].append(
+        parser.skipped_missing_data)
+    except: stats_dict["sites_skipped_missing_data"].append(None)
+    try: stats_dict["sites_skipped_triallelic"].append(
+        parser.skipped_triallelic)
+    except: stats_dict["sites_skipped_triallelic"].append(None)
+    try:
+        stats_dict["median_depth"].append(
+            select_median("maj_depth+min_depth", poplabel, db_sqlite))
+    except: stats_dict["median_depth"].append(None)
+    try:
+        stats_dict["mean_depth"].append(
+            select_average("maj_depth+min_depth", poplabel, db_sqlite))
+    except: stats_dict["mean_depth"].append(None)
+    try:
+        stats_dict["average_expected_heterozygosity"].append(
+            select_average_expected_heterozygosity(poplabel, db_sqlite))
+    except: stats_dict["average_expected_heterozygosity"].append(None)
+
+    return stats_dict
+
 def main(finputs: list, pop_labels:list, nchroms: list,
          intersect_sites: str=None):
     """
@@ -587,30 +647,16 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     for pl, nc in zip(pop_labels, nchroms):
         poplab_to_nchrom[str(pl)] = int(nc)
 
-    # Initialize combinations of pop. labels of which an SFS will be computed.
+    # Initialize combinations of pop. labels. An SFS will be computed for each
+    # single population and pair of populations.
     sfs_dict = combinations_populations(pop_labels)
     amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
     amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
     print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
         amount_sfs_onedim, amount_sfs_bidim))
 
-    # Initialize a dictionary to store "stats" regarding the analysis.
-    stats = {
-        "index": list(),
-        "sites_total": list(),
-        # Included sites are all lines with data minus skipped lines, which are
-        # "None" for the ngsPool and BED parsers; only applicable to sync files.
-        "sites_included": list(),
-        "skipped_comment": list(),
-        "sites_skipped_ambiguous_ref": list(),
-        "sites_skipped_missing_data": list(),
-        "sites_skipped_triallelic": list(),
-        "median_depth": list(),
-        "mean_depth": list(),
-        "average_expected_heterozygosity": list(),
-    }
-
-    # Tell which files will be read as SYNC or ngsPool...
+    # Tell which files will be read as SYNC or ngsPool. Raise an Exception if
+    # any extension does not match the expected formats.
     for fi in finputs:
         if "sync" in str(fi).lower():
             print(f"INFO: Detected that '{fi}' is a SYNC-formatted file.")
@@ -624,7 +670,8 @@ def main(finputs: list, pop_labels:list, nchroms: list,
                             + " 'out' or 'ngsPool' for ngsPool files"
                             + " (either lower or upper case).")
 
-    # Check that the three lists in parameters are of the same length.
+    # Check that the three lists in parameters are of the same length; each
+    # input filename must also have a pop. label and a n. of chrom.
     if len(finputs) != len(pop_labels) or len(finputs) != len(nchroms):
         raise Exception("The lists of file inputs, pop. labels and num."
                         + " of chromosomes must be of the same length.")
@@ -639,82 +686,48 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     print("INFO: Storing an sqlite3 database with the polymorphism data"
           + f" in a temporary file at '{temp_file.name}'.")
 
+    # Initialize a "stats" dictionary for storing num. of sites and other
+    # information of the input files.
+    stats = dict()
+
     # Create a table within the database for each input file.
     for fi, nc, pl in zip(finputs, nchroms, pop_labels):
         print(f"INFO: Reading '{fi}' and writing data to database.")
-        # Try to find a "sync" extension.
+        # Try to match a "sync", "ngspool" or "out" extension.
+
         if "sync" in str(fi).lower():
             parser = ParserGenData.from_sync(fi, nc)
             parser.populate_new_sqlite_table(pl, temp_file.name)
             # Compute stats of this data file.
-            stats["index"].append(pl)
-            stats["sites_total"].append(parser.numsites)
-            stats["sites_included"].append(
-                parser.numsites - (parser.skipped_ambiguous_ref
-                    + parser.skipped_missing_data + parser.skipped_triallelic)
-            )
-            stats["skipped_comment"].append(parser.skipped_comment)
-            stats["sites_skipped_ambiguous_ref"].append(parser.skipped_ambiguous_ref)
-            stats["sites_skipped_missing_data"].append(parser.skipped_missing_data)
-            stats["sites_skipped_triallelic"].append(parser.skipped_triallelic)
-            stats["median_depth"].append(
-                select_median("maj_depth+min_depth", pl, temp_file.name))
-            stats["mean_depth"].append(
-                select_average("maj_depth+min_depth", pl, temp_file.name))
-            stats["average_expected_heterozygosity"].append(
-                select_average_expected_heterozygosity(pl, temp_file.name))
+            stats = write_stats(parser, stats, pl, temp_file.name)
+            # Print these stats.
+            for key, vals in stats.items():
+                print("        * {}: {}".format(key, vals[-1]))
 
-        # Try to find an "out" or "ngspool" extension.
         elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
             parser = ParserGenData.from_ngsPool(fi, nc)
             parser.populate_new_sqlite_table(pl, temp_file.name)
             # Compute stats of this data file.
-            stats["index"].append(pl)
-            stats["sites_total"].append(parser.numsites)
-            stats["sites_included"].append( parser.numsites)
-            stats["skipped_comment"].append(parser.skipped_comment)
-            stats["sites_skipped_ambiguous_ref"].append(None)
-            stats["sites_skipped_missing_data"].append(None)
-            stats["sites_skipped_triallelic"].append(None)
-            stats["median_depth"].append(None)
-            stats["mean_depth"].append(None)
-            stats["average_expected_heterozygosity"].append(
-                select_average_expected_heterozygosity(pl, temp_file.name))
+            stats = write_stats(parser, stats, pl, temp_file.name)
+            # Print these stats.
+            for key, vals in stats.items():
+                print("        * {}: {}".format(key, vals[-1]))
 
     if intersect_sites:
         print(f"INFO: Reading the BED '{intersect_sites}'"
               + " with intersecting sites.")
         parser = ParserGenData.from_bed(intersect_sites)
-        # Remove directory and extensions from filename so it can be used as
-        # table name.
+        # Remove directory and extensions from the filename so it can be used as
+        # a table name.
         intersect_tblname = os.path.split(intersect_sites)[1].split(".")[0]
         parser.populate_new_sqlite_table(intersect_tblname, temp_file.name)
         # Compute stats of this data file.
-        stats["index"].append("INTERSECT.BED")
-        stats["sites_total"].append(parser.numsites)
-        stats["sites_included"].append( parser.numsites)
-        stats["skipped_comment"].append(parser.skipped_comment)
-        stats["sites_skipped_ambiguous_ref"].append(None)
-        stats["sites_skipped_missing_data"].append(None)
-        stats["sites_skipped_triallelic"].append(None)
-        stats["median_depth"].append(None)
-        stats["median_depth"].append(None)
-        stats["average_expected_heterozygosity"].append(None)
+        stats = write_stats(parser, stats, "INTERSECT.BED", None)
+        # Print these stats.
+        for key, vals in stats.items():
+            print("        * {}: {}".format(key, vals[-1]))
 
-    print("INFO: Finished reading input data; printing stats.")
-    # Add hashtag '#' to header.
-    print("#", end="")
-    for colname in stats.keys():
-        print(colname, end="\t")
-    # Add a newline.
-    print()
-    for rowi in range(len(stats[colname])):
-        for val in [values[rowi] for values in stats.values()]:
-            print(val, end="\t")
-        # Add a newline.
-        print()
-
-
+    print("INFO: Finished reading input data.")
 
     print("INFO: Executing the inner join of the database with the columns"
           + " 'chromosome' and 'pos' (finding sites shared across"
@@ -728,13 +741,19 @@ def main(finputs: list, pop_labels:list, nchroms: list,
         print("WARNING: Unexpected order for the columns of the database.")
         print("DEBUG:", pop_labels, db_tblnames)
 
-    print("INFO: Adding sites from the input polymorphism calling data"
-          + " to these SFS iteratively.")
+    print("INFO: Creating 'moments' SFS from the inner join of the"
+          + " input polymorphism calling data.")
 
-    # Start iterating through sites.
+    # Initialize vars before loop.
     moments_dd = dict()
+    skipped_triallelic = 0
+    # Start iterating through sites found within the intersection (iterate
+    # across sites shared across all files).
     for db_row in db_res:
         site, data_dict = from_dbrow_to_moments_dd(db_row, pop_labels)
+        if not data_dict:
+            print("WARNING: Triallelic site in the shared sites.")
+            skipped_triallelic += 1
         moments_dd[site] = data_dict
         # Avoid loading into memory all of the sites at once. When the loop
         # reaches the 100 000th site, convert this data into SFS. Repeat the
@@ -748,13 +767,27 @@ def main(finputs: list, pop_labels:list, nchroms: list,
             # "sfs_dict.keys()".
             from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
-    # Finally, the remaining "moments_dd" if the amount of sites are not
-    # modulo 100 000:
+    # Finally, add the remaining sites in "moments_dd" if the amount of sites
+    # was not exactly modulo 100 000:
     print(f"INFO: Reached the end at {row_num} sites.")
     if moments_dd:
         from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
-    # PROCESS STATS OF THE NEWLY CREATED SFS?
+    # Append stats.
+    for key in stats.keys():
+        if key == "poplabel":
+            stats[key].append("DB-INNER-JOIN")
+        elif key == "sites_total":
+            stats[key].append(row_num)
+        elif key == "sites_skipped_triallelic":
+            stats[key].append(skipped_triallelic)
+        elif key == "sites_included":
+            stats[key].append(row_num - skipped_triallelic)
+        else:
+            stats[key].append(None)
+    # Print these stats.
+    for key, vals in stats.items():
+        print("        * {}: {}".format(key, vals[-1]))
 
     # Return all of the SFS. Remember to remove the temporary list the SFS are
     # in (i.e. slice and return the first item).
