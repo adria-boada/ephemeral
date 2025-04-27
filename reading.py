@@ -15,7 +15,7 @@ Available formats for conversion to `moments.Spectrum`:
 - *ngsPool.out (output from ngsJulia).
 """
 
-# Input files could be gzipped.
+# Prepare for reading compressed (gzipped) input files.
 import gzip
 # Create sqlite3 databases as temporary data files in the home directory.
 import sqlite3
