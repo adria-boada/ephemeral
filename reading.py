@@ -652,8 +652,9 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     sfs_dict = combinations_populations(pop_labels)
     amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
     amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
-    print("INFO: Creating '{}' 1D-SFS and '{}' 2D-SFS...".format(
-        amount_sfs_onedim, amount_sfs_bidim))
+    print("INFO: As many as"
+          + " '{}' 1D-SFS and '{}' 2D-SFS will be created.".format(
+          amount_sfs_onedim, amount_sfs_bidim))
 
     # Tell which files will be read as SYNC or ngsPool. Raise an Exception if
     # any extension does not match the expected formats.
@@ -683,8 +684,8 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     home = pathlib.Path.home()
     temp_file = tempfile.NamedTemporaryFile(
         dir=home, prefix="ephemeral.tmp", suffix=".sqlite3")
-    print("INFO: Storing an sqlite3 database with the polymorphism data"
-          + f" in a temporary file at '{temp_file.name}'.")
+    print("INFO: Storing the polymorphism data in a temporary"
+          + f" sqlite3 database file at '{temp_file.name}'.")
 
     # Initialize a "stats" dictionary for storing num. of sites and other
     # information of the input files.
