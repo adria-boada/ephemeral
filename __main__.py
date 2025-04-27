@@ -6,20 +6,33 @@
 # 04 de gen. 2025  <adria@molevol-OptiPlex-9020>
 
 help_msg = """
-Describe here the goal, input, output, etc. of the script
-as a multi-line block of text.
+Create an SFS from pooled polymorphism data files and iteratively find some
+population variables which fit these SFS.
 """
 
-import sys
-import pprint
+import os.path
 import moments, numpy as np
 
 from . import reading, predefined_models as predef, Optimize_Functions
 
 
-def func_create_sfs(args):
+def func_tosfs(args):
     """
-    Create an SFS from polymorphism data.
+    Create one or multiple SFS from polymorphism data. Exports it to an output
+    directory.
+
+    Args
+    ----
+
+    args.intersect_sites : str
+    Input BED file with genomic coordinates.
+
+    args.data_input : list
+    A list with pairs of pop. label, num. of chromosomes and polymorphism data
+    file.
+
+    args.output_dir : str
+    Inexistent directory name; create a new directory and write output there.
     """
 
     # Avoid having the file open in memory through 'argparse'.
@@ -29,41 +42,69 @@ def func_create_sfs(args):
         intersect_sites = args.intersect_sites.name
     else:
         intersect_sites = None
+    # Check whether "args.output_dir" exists to avoid overwritting.
+    if os.path.exists(args.output_dir):
+        raise FileExistsError(f"The given output dir. '{args.output_dir}'"
+                              + " already exists.")
 
     # Record args into local variables. These are zipped lists.
     pop_labels = [str(a.split("=")[0]) for a in args.data_input]
     nchroms = [int(a.split("=")[1]) for a in args.data_input]
     fins = [str(a.split("=")[2]) for a in args.data_input]
 
-    # Create the moments data dictionary.
-    moments_dd = reading.build_moments_data_dict(
-        fins=fins,
-        pop_labels=pop_labels,
-        nchroms=nchroms,
+    # Create the requested single or multiple SFS.
+    sfs_dict, logs = reading.main(
+        finputs=fins, pop_labels=pop_labels, nchroms=nchroms,
         intersect_sites=intersect_sites)
 
-    sfs = moments.Spectrum.from_data_dict(
-        moments_dd, polarized=False,
-        pop_ids=pop_labels, projections=nchroms,
-        # Remember to mask the corners before an expensive analysis?
-        mask_corners=False)
+    # Create a directory for writing output to.
+    os.mkdir(args.output_dir)
+    os.chdir(args.output_dir)
+    # Store the logs.
+    with open("input.log", "x") as fhandle:
+        # Write a header.
+        line = "\t".join(["filename"] + [str(k) for k in logs.keys()])
+        line = "#" + str(line) + "\n"
+        fhandle.write(line)
 
-    return {"sfs": sfs, "moments_dd": moments_dd}
+        # Write rows for each input data file (for each pop. lab.).
+        for i in range(len(logs["poplabel"])):
+            pl = logs["poplabel"][i]
+            if pl in pop_labels:
+                filename = fins[pop_labels.index(pl)]
+            else:
+                filename = None
+            values = [str(val[i]) for val in logs.values()]
+            line = "\t".join([str(filename)] + list(values))
+            fhandle.write(line + "\n")
 
-def func_tosfs(args):
-    """
-    Exports a previously created SFS.
-    """
+    # Store each SFS and information/logs (num. of sites, Fst, etc.).
+    for pls, sfs in sfs_dict.items():
+        # Write SFS to a file.
+        outname = write_sfs(pls, sfs)
+        # Change the extension of the outname to ".log" instead of ".sfs" for
+        # writing log information to.
+        logname = outname.strip(".sfs") + ".log"
+        # Create a summary.
+        summary = sfs_summary(sfs)
+        with open(logname, "x") as fhandle:
+            fhandle.write(summary)
 
-    data = func_create_sfs(args)
-    # Export the intermediate datadict for debugging reasons.
-    with open("output.debug.datadict", "x") as fout:
-        pprint.pp(data["moments_dd"], stream=fout)
-    # Export the newly created SFS into a file. First makes sure the file does
-    # not exist already. Can be reused within another `moments' instance.
-    with open("output.sfs", "x") as fout:
+    return None
+
+def write_sfs(pop_labels, moments_sfs):
+    if len(pop_labels) == 1:
+        outname = "onedim." + ".".join(pop_labels) + ".sfs"
+    elif len(pop_labels) == 2:
+        outname = "bidim." + ".".join(pop_labels) + ".sfs"
+
+    # Check file does not exist.
+    with open(outname, "x"):
         pass
-    data["sfs"].to_file("output.sfs")
+    # Write SFS to disk.
+    moments_sfs.to_file(outname)
+
+    return outname
 
 def func_optim(args):
     """
@@ -145,9 +186,26 @@ def func_optim(args):
         args.out_prefix = "_".join(sorted(sfs.pop_ids))
 
     # Print summary (useful info. of data).
-    print_summary(args, sfs)
+    print(sfs_summary(sfs))
 
-    # Mask the corners; does it speed up computation?
+    # Print the options/config. selected for optim algorithm.
+    print("\n# Overview of algor. params.")
+    print("============================")
+    print("· User-specified steps of the optimization algorithm, " +
+          "per round ('--max-iters'): " +
+          str(args.max_iters))
+    print("· User-specified perturbation of the starting parameters, " +
+          "per round ('--fold-algor'): " +
+          str(args.fold_algor))
+    if args.independent_runs:
+        print("· Performing {} independent runs.".format(
+            args.independent_runs))
+    elif args.manual_exec_i:
+        print("· Performing a single run with ID/number " +
+              "'{}'.".format(args.manual_exec_i))
+    print("· Using the output file prefix '{}'".format(args.out_prefix))
+
+    # Mask the corners; does it speed up computation? Is it necessary?
     sfs.mask_corners()
 
     # Start the algor.
@@ -172,45 +230,31 @@ def func_optim(args):
 
     return None
 
-def print_summary(args, sfs: moments.Spectrum):
+def sfs_summary(sfs: moments.Spectrum):
     """
-    Print useful info about the AFS or join-site FS.
+    For printing useful info about the AFS or join-site FS.
     """
 
-    print("\n# Overview of the 2D-SFS")
-    print("========================")
     # Check if the SFS is folded or unfolded.
     if sfs.folded: kind_fold = "folded"
     else: kind_fold = "unfolded"
-    print("· The 2D-SFS data has been interpreted"
-          + " to be {}.".format(kind_fold))
-    print("· Populations labels or IDs.: {}".format(sfs.pop_ids))
-    print("· In the same order of pop. ids., their sample sizes"
-          + " (nchr.): {}".format( sfs.sample_sizes))
-    # Sum of 'sites' and 'segregating sites' rounded to two decimal places.
-    print("· Sum of sites (including monomorph.) in the SFS: {}".format(
-        np.around(sfs.sum(), 2)))
-    print("· Sum of segregating sites: {}".format(
-        np.around(sfs.S(), 2)))
 
-    print("· The Fst between pops is '{}'.".format(sfs.Fst()))
-    print("\n# Overview of algor. params.")
-    print("============================")
-    print("· User-specified steps of the optimization algorithm, " +
-          "per round ('--max-iters'): " +
-          str(args.max_iters))
-    print("· User-specified perturbation of the starting parameters, " +
-          "per round ('--fold-algor'): " +
-          str(args.fold_algor))
-    if args.independent_runs:
-        print("· Performing {} independent runs.".format(
-            args.independent_runs))
-    elif args.manual_exec_i:
-        print("· Performing a single run with ID/number " +
-              "'{}'.".format(args.manual_exec_i))
-    print("· Using the output file prefix '{}'".format(args.out_prefix))
+    summary = list([
+        f"# Overview of the {len(sfs.pop_ids)}D-SFS",
+        "========================",
+        f"· The data has been interpreted to be {kind_fold}.",
+        f"· Populations labels or IDs.: {sfs.pop_ids}",
+        "· Sample sizes for these populations (~ nchr.), respectively: "
+        + f"{sfs.sample_sizes}",
+        "· Sum of sites (including monomorph.) in the SFS: "
+        + f"{np.around(sfs.sum(), 2)}.",
+        f"· Sum of segregating sites: {np.around(sfs.S())}.",
+        f"· The Fst between pops: {sfs.Fst()}.",
+    ])
+    # Join lines in the list with newline characters.
+    summary = "\n".join(summary)
 
-    return None
+    return summary
 
 def marginalize_sfs(sfs: moments.Spectrum, pop_lab: list):
     """
@@ -253,23 +297,27 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         "ephemeral",
         description=help_msg,
-        # make sure the 'help_msg' is not automatically
-        # wrapped at 80 characters (manually assign newlines).
+        # Make sure the 'help_msg' is not automatically
+        # wrapped at 80 characters. Newlines must be added manually.
         formatter_class=argparse.RawTextHelpFormatter)
+
+    # The top-level parser does not read args., a call to a subcommand/subparser
+    # is always required.
     subparsers = parser.add_subparsers(
         required=True, help="Available subcommands.")
 
-    # "TOSFS" SUBCOMMAND
-    # ------------------
+    # "TOSFS" SUBPARSER
+    # -----------------
     parser_tosfs = subparsers.add_parser(
-        "toSFS", # subcommand name.
-        description="Create a multidimensional SFS from"
-        + " polymorphism data files.",
-        help="Create a multidimensional SFS from polymorphism"
-        + " data files.", )
+        # Subparser name.
+        "toSFS",
+        description="Create 1D or/and 2D SFS from pooled polymorphism"
+        + " data files. Accepts SYNC and NGSPOOL (from ngsJulia) formats.",
+        help="Create 1D or/and 2D SFS from pooled polymorphism"
+        + " data files. Accepts SYNC and NGSPOOL (from ngsJulia) formats.")
     parser_tosfs.set_defaults(func=func_tosfs)
     parser_tosfs.add_argument(
-        "--intersect", type=argparse.FileType("r"), required=False,
+        "--intersect-sites", type=argparse.FileType("r"), required=False,
         metavar="BED-LIKE", dest="intersect_sites", default=None,
         help="A BED-like file with sites which will intersect the"
         + " SNP files before creating an SFS.")
@@ -278,6 +326,10 @@ if __name__ == '__main__':
         help="Label of the population, number of chromosomes,"
         + " and file-name, separated by equal characters. Add as many"
         + " population data as required (will output multidim. SFS).")
+    parser_tosfs.add_argument(
+        "--output-dir", required=True, metavar="DIR", type=str,
+        help="New directory name in which the output will be"
+        + " written to.")
 
 #>    parser_tosfs.add_argument(
 #>        "--polarized", action="store_const", const=True,
@@ -286,8 +338,8 @@ if __name__ == '__main__':
 #>        + " SFS will be unpolarized (folded)."
 #>        + " DO NOT USE, NOT IMPLEMENTED WELL.")
 
-    # "MARGIN" SUBCOMMAND
-    # -------------------
+    # "MARGIN" SUBPARSER
+    # ------------------
     parser_margin = subparsers.add_parser(
         "margin", # subcommand name.
         description="Marginalize (filter out) populations from a"
@@ -305,8 +357,8 @@ if __name__ == '__main__':
         help="Population labels (matching those provided within the SFS)"
         + " which will be isolated to a new SFS of reduced dimensionality.")
 
-    # "OPTIM" SUBCOMMAND
-    # ------------------
+    # "OPTIM" SUBPARSER
+    # -----------------
     parser_optim = subparsers.add_parser(
         "optim", # subcommand name.
         description="Optimize population variables to fit an"
