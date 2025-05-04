@@ -11,6 +11,8 @@ population variables which fit these SFS.
 """
 
 import os.path
+import logging
+
 import moments, numpy as np
 
 from . import reading, predefined_models as predef, Optimize_Functions
@@ -421,6 +423,13 @@ if __name__ == '__main__':
         help="The perturbation of the starting parameters; must be a list"
         + " of ints of length 'ROUNDS' (default: from 'ROUNDS' to '1').")
 
+
+    # Configure logging.
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(levelname)s.%(name)s.%(asctime)s.  %(message)s',
+        datefmt='%H:%M:%S',
+        force=True)
 
     # To call a value, use `args.value` or `args.filename`.
     args = parser.parse_args()

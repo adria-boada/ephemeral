@@ -26,9 +26,15 @@ import re
 # To assign a name to the sqlite3 table created with the BED intersection sites,
 # we will use its filename.
 import os.path
+# Logging.
+import logging
+
 # Conversion from data dictionaries to `moments.Spectrum`.
 import moments.Spectrum_mod
 
+
+# Prepare logging.
+logger = logging.getLogger(__name__)
 
 # Decide if a file is compressed or uncompressed and open it with the correct
 # function depending on its extension.
@@ -500,7 +506,7 @@ def from_dbrow_to_moments_dd(db_row, pop_labels):
     alleles = list(set([a for a in maj_alleles + min_alleles
                         if a != "N"]))
     # If the site is triallelic, skip it (return None).
-    if len(alleles) > 2: return None
+    if len(alleles) > 2: return site, None
     # If the site is monomorphic, add an ambiguous nucleotide for formatting
     # reasons.
     if len(alleles) == 1:
@@ -652,17 +658,17 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     sfs_dict = combinations_populations(pop_labels)
     amount_sfs_onedim = len([k for k in sfs_dict.keys() if len(k) == 1])
     amount_sfs_bidim  = len([k for k in sfs_dict.keys() if len(k) == 2])
-    print("INFO: As many as"
-          + " '{}' 1D-SFS and '{}' 2D-SFS will be created.".format(
-          amount_sfs_onedim, amount_sfs_bidim))
+    logger.info("As many as"
+                + " '{}' 1D-SFS and '{}' 2D-SFS will be created.".format(
+                amount_sfs_onedim, amount_sfs_bidim))
 
     # Tell which files will be read as SYNC or ngsPool. Raise an Exception if
     # any extension does not match the expected formats.
     for fi in finputs:
         if "sync" in str(fi).lower():
-            print(f"INFO: Detected that '{fi}' is a SYNC-formatted file.")
+            logger.info(f"Detected that '{fi}' is a SYNC-formatted file.")
         elif "out" in str(fi).lower() or "ngspool" in str(fi).lower():
-            print(f"INFO: Detected that '{fi}' is an ngsPool-formatted"
+            logger.info(f"Detected that '{fi}' is an ngsPool-formatted"
                   + " file.")
         else:
             raise Exception("Could not detect the correct file"
@@ -670,6 +676,8 @@ def main(finputs: list, pop_labels:list, nchroms: list,
                             + " 'sync' for SYNC files and"
                             + " 'out' or 'ngsPool' for ngsPool files"
                             + " (either lower or upper case).")
+    if intersect_sites:
+        logger.info(f"Using '{intersect_sites}' as an intersecting BED.")
 
     # Check that the three lists in parameters are of the same length; each
     # input filename must also have a pop. label and a n. of chrom.
@@ -684,7 +692,7 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     home = pathlib.Path.home()
     temp_file = tempfile.NamedTemporaryFile(
         dir=home, prefix="ephemeral.tmp", suffix=".sqlite3")
-    print("INFO: Storing the polymorphism data in a temporary"
+    logger.info("Storing the polymorphism data in a temporary"
           + f" sqlite3 database file at '{temp_file.name}'.")
 
     # Initialize a "stats" dictionary for storing num. of sites and other
@@ -693,7 +701,7 @@ def main(finputs: list, pop_labels:list, nchroms: list,
 
     # Create a table within the database for each input file.
     for fi, nc, pl in zip(finputs, nchroms, pop_labels):
-        print(f"INFO: Reading '{fi}' and writing data to database.")
+        logger.info(f"Reading '{fi}' and writing data to database.")
         # Try to match a "sync", "ngspool" or "out" extension.
 
         if "sync" in str(fi).lower():
@@ -715,7 +723,7 @@ def main(finputs: list, pop_labels:list, nchroms: list,
                 print("        * {}: {}".format(key, vals[-1]))
 
     if intersect_sites:
-        print(f"INFO: Reading the BED '{intersect_sites}'"
+        logger.info(f"Reading the BED '{intersect_sites}'"
               + " with intersecting sites.")
         parser = ParserGenData.from_bed(intersect_sites)
         # Remove directory and extensions from the filename so it can be used as
@@ -728,9 +736,9 @@ def main(finputs: list, pop_labels:list, nchroms: list,
         for key, vals in stats.items():
             print("        * {}: {}".format(key, vals[-1]))
 
-    print("INFO: Finished reading input data.")
+    logger.info("Finished reading input data.")
 
-    print("INFO: Executing the inner join of the database with the columns"
+    logger.info("Executing the inner join of the database with the columns"
           + " 'chromosome' and 'pos' (finding sites shared across"
           + " all of the given files).")
     db_res, db_tblnames = select_shared_loci(temp_file.name)
@@ -739,38 +747,46 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     if intersect_sites:
         db_tblnames = db_tblnames[:-1]
     if list(pop_labels) != list(db_tblnames):
-        print("WARNING: Unexpected order for the columns of the database.")
-        print("DEBUG:", pop_labels, db_tblnames)
+        logger.warning("Unexpected order for the columns of the database.")
+        logger.warning(pop_labels, db_tblnames)
 
-    print("INFO: Creating 'moments' SFS from the inner join of the"
+    logger.info("Creating 'moments' SFS from the inner join of the"
           + " input polymorphism calling data.")
 
     # Initialize vars before loop.
     moments_dd = dict()
     skipped_triallelic = 0
+    row_num = 0
     # Start iterating through sites found within the intersection (iterate
     # across sites shared across all files).
     for db_row in db_res:
         site, data_dict = from_dbrow_to_moments_dd(db_row, pop_labels)
         if not data_dict:
-            print("WARNING: Triallelic site in the shared sites.")
+            logger.warning("Triallelic site in the shared sites.")
             skipped_triallelic += 1
-        moments_dd[site] = data_dict
+        else:
+            moments_dd[site] = data_dict
         # Avoid loading into memory all of the sites at once. When the loop
         # reaches the 100 000th site, convert this data into SFS. Repeat the
         # process and sum the vectors or matrices (1D or 2D SFS) converted at
         # each step.
         row_num = db_row[0]
         if row_num % 100000 == 0:
-            print(f"INFO: Reached {row_num} sites.")
+            logger.info(f"Reached {row_num} sites.")
 
             # Compute SFS for the keys (pair or single pop.) in
             # "sfs_dict.keys()".
             from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
+    if row_num == 0:
+        # The length of 'db_res' (i.e. shared sites) is zero. The intersection
+        # of ALL files is an empty set.
+        raise ValueError("The intersection of ALL files is an empty set;"
+                         + " there are no shared sites across all files.")
+
     # Finally, add the remaining sites in "moments_dd" if the amount of sites
     # was not exactly modulo 100 000:
-    print(f"INFO: Reached the end at {row_num} sites.")
+    logger.info(f"Reached the end at {row_num} sites.")
     if moments_dd:
         from_moments_dd_to_sfs_dict(moments_dd, sfs_dict, poplab_to_nchrom)
 
