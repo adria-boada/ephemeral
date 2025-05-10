@@ -229,10 +229,10 @@ def func_optim(args):
     # Print the options/config. selected for optim algorithm.
     print("\n# Overview of algor. params.")
     print("============================")
-    print("· User-specified steps of the optimization algorithm, " +
+    print("· Steps of the optimization algorithm, " +
           "per round ('--max-iters'): " +
           str(args.max_iters))
-    print("· User-specified perturbation of the starting parameters, " +
+    print("· Perturbation of the starting parameters, " +
           "per round ('--fold-algor'): " +
           str(args.fold_algor))
     if args.independent_runs:
@@ -413,7 +413,7 @@ if __name__ == '__main__':
     parser_optim.add_argument(
         "--replicates", required=True, nargs="+", type=int,
         help="Replicates for each round; must be a list of ints"
-        + " of length 'ROUNDS'.")
+        + " of length 'ROUNDS' (accepts multiple arguments).")
 
     execucions = parser_optim.add_mutually_exclusive_group(required=True)
     execucions.add_argument(
