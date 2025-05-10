@@ -13,7 +13,9 @@ population variables which fit these SFS.
 import os.path
 import logging
 
-import moments, numpy as np
+import moments
+import numpy as np
+import matplotlib.pyplot as plt
 
 from . import reading, predefined_models as predef, Optimize_Functions
 
@@ -84,6 +86,8 @@ def func_tosfs(args):
     for pls, sfs in sfs_dict.items():
         # Write SFS to a file.
         outname = write_sfs(pls, sfs)
+        # Plot SFS to a file.
+        plot_sfs(pls, sfs)
         # Change the extension of the outname to ".log" instead of ".sfs" for
         # writing log information to.
         logname = outname.strip(".sfs") + ".log"
@@ -91,6 +95,24 @@ def func_tosfs(args):
         summary = sfs_summary(sfs)
         with open(logname, "x") as fhandle:
             fhandle.write(summary)
+
+    # Plot all of the SFS in a single file (for comparing them).
+    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, layout="constrained")
+    [ax.set_xlabel("Minor (folded) allele freq.")
+     for ax in (ax1, ax2)]
+    ax1.set_ylabel("Density")
+    ax2.set_ylabel("Count of sites")
+    for pls, sfs in sfs_dict.items():
+        if len(pls) > 1: continue
+        # Mask corners, i.e. remove sites with minor allele freq. = 0
+        sfs.mask_corners()
+        # Plot a density and total count graphs.
+        ax1.plot(sfs/sfs.S(), label=str(pls[0]))
+        ax2.plot(sfs, label=str(pls[0]))
+    [ax.legend() for ax in (ax1, ax2)]
+    [ax.set_xlim(left=1) for ax in (ax1, ax2)]
+    [ax.set_xticks(list(ax.get_xticks())[1:] + [1]) for ax in (ax1, ax2)]
+    plt.savefig("comparison.sfs.png")
 
     return None
 
@@ -105,6 +127,22 @@ def write_sfs(pop_labels, moments_sfs):
         pass
     # Write SFS to disk.
     moments_sfs.to_file(outname)
+
+    return outname
+
+def plot_sfs(pop_labels, moments_sfs):
+    if len(pop_labels) == 1:
+        outname = "onedim." + ".".join(pop_labels) + ".sfs.png"
+        fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+        ax.plot(moments_sfs, label=pop_labels)
+        plt.legend()
+    elif len(pop_labels) == 2:
+        outname = "bidim." + ".".join(pop_labels) + ".sfs.png"
+        fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+        moments.Plotting.plot_single_2d_sfs(moments_sfs, ax=ax)
+
+    plt.savefig(outname)
+    plt.close()
 
     return outname
 
@@ -332,6 +370,8 @@ if __name__ == '__main__':
         "--output-dir", required=True, metavar="DIR", type=str,
         help="New directory name in which the output will be"
         + " written to.")
+    parser_tosfs.add_argument(
+        "-v", "--verbose", action="store_true")
 
 #>    parser_tosfs.add_argument(
 #>        "--polarized", action="store_const", const=True,
@@ -424,15 +464,25 @@ if __name__ == '__main__':
         + " of ints of length 'ROUNDS' (default: from 'ROUNDS' to '1').")
 
 
-    # Configure logging.
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(levelname)s.%(name)s.%(asctime)s.  %(message)s',
-        datefmt='%H:%M:%S',
-        force=True)
 
     # To call a value, use `args.value` or `args.filename`.
     args = parser.parse_args()
+
+    # Configure logging. args.verbose might not exist.
+    try:
+        level = logging.DEBUG if args.verbose else logging.INFO
+        logging.basicConfig(
+            level=level,
+            format='%(levelname)s.%(name)s.%(asctime)s.  %(message)s',
+            datefmt='%H:%M:%S',
+            force=True)
+    except:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(levelname)s.%(name)s.%(asctime)s.  %(message)s',
+            datefmt='%H:%M:%S',
+            force=True)
+
     # Pass the args to the function assigned to each subcommand.
     args.func(args)
 
