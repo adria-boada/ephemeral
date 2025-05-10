@@ -105,10 +105,11 @@ def func_tosfs(args):
     for pls, sfs in sfs_dict.items():
         if len(pls) > 1: continue
         # Mask corners, i.e. remove sites with minor allele freq. = 0
-        sfs.mask_corners()
+        sfs_copy = sfs.copy()
+        sfs_copy.mask_corners()
         # Plot a density and total count graphs.
-        ax1.plot(sfs/sfs.S(), label=str(pls[0]))
-        ax2.plot(sfs, label=str(pls[0]))
+        ax1.plot(sfs_copy/sfs_copy.S(), label=str(pls[0]))
+        ax2.plot(sfs_copy, label=str(pls[0]))
     [ax.legend() for ax in (ax1, ax2)]
     [ax.set_xlim(left=1) for ax in (ax1, ax2)]
     [ax.set_xticks(list(ax.get_xticks())[1:] + [1]) for ax in (ax1, ax2)]
@@ -132,10 +133,11 @@ def write_sfs(pop_labels, moments_sfs):
 
 def plot_sfs(pop_labels, moments_sfs):
     if len(pop_labels) == 1:
-        moments_sfs.mask_corners()
+        moments_sfs_copy = moments_sfs.copy()
+        moments_sfs_copy.mask_corners()
         outname = "onedim." + ".".join(pop_labels) + ".sfs.png"
         fig, ax = plt.subplots(1, 1, figsize=(8, 4))
-        ax.plot(moments_sfs, label=pop_labels)
+        ax.plot(moments_sfs_copy, label=pop_labels)
         ax.legend()
         ax.set_xlim(left=1)
         ax.set_xticks(list(ax.get_xticks())[1:] + [1])
@@ -208,17 +210,10 @@ def func_optim(args):
             + " are given for the optimization of 2D-SFS.")
     # If more than 2 pop data, the SFS should be marginalized over 2.
     elif len(sfs.pop_ids) > 2:
-        if not args.pop_lab:
-            raise Exception(
-                "Please provide a pair of pop. labels through"
-                + " '--pop-lab' in order to isolate these and create a"
-                + " bidimensional SFS from a multidimensional SFS.")
-        if len(args.pop_lab) != 2:
-            raise Exception(
-                "Population data (positional parameter) includes more"
-                + " than 2 populations. However, a pair of pop. labels"
-                + " should be provided to marginalize these and create"
-                + " a bidimensional SFS (see '--pop-lab' within '--help').")
+        raise Exception(
+            "Population data (positional parameter) includes more than"
+            + " two populations. Make sure there are only a pair of"
+            + " populations given for the optimization of 2D-SFS.")
 
         print("INFO: More than a pair of population data was included.")
         sfs = marginalize_sfs(sfs, args.pop_lab)
@@ -391,32 +386,6 @@ if __name__ == '__main__':
     parser_tosfs.add_argument(
         "-v", "--verbose", action="store_true")
 
-#>    parser_tosfs.add_argument(
-#>        "--polarized", action="store_const", const=True,
-#>        default=False,
-#>        help="Flag to create a polarized SFS input. If unset the"
-#>        + " SFS will be unpolarized (folded)."
-#>        + " DO NOT USE, NOT IMPLEMENTED WELL.")
-
-    # "MARGIN" SUBPARSER
-    # ------------------
-    parser_margin = subparsers.add_parser(
-        "margin", # subcommand name.
-        description="Marginalize (filter out) populations from a"
-        + " multidimensional SFS (reducing dimensionality).",
-        help="Marginalize (filter out) populations from a"
-        + " multidimensional SFS (reducing dimensionality).", )
-    parser_margin.set_defaults(func=func_margin)
-    # SFS file which will be imported with 'moments' to be filtered.
-    parser_margin.add_argument(
-        "sfs_input", type=str, metavar="SFS",
-        help="'Site Frequency Spectrum' obtained from the other"
-        + " subcommand 'toSFS'.")
-    parser_margin.add_argument(
-        "--pop-lab", required=True, nargs="+", metavar="ID", type=str,
-        help="Population labels (matching those provided within the SFS)"
-        + " which will be isolated to a new SFS of reduced dimensionality.")
-
     # "OPTIM" SUBPARSER
     # -----------------
     parser_optim = subparsers.add_parser(
@@ -430,9 +399,7 @@ if __name__ == '__main__':
     parser_optim.add_argument(
         "sfs_input", type=str, metavar="SFS",
         help="'Site Frequency Spectrum' obtained from the other"
-        + " subcommand 'toSFS'. If it is above 2D (multidimensional),"
-        + " then it is required to marginalize, leaving only 2 pops"
-        + " (through specifying '--pop-lab').")
+        + " subcommand 'toSFS'. It must be bidimensional (2D-SFS).")
     parser_optim.add_argument(
         "--fit-models", required=True, nargs="+",
         choices=list(predef.models.keys()), metavar="MODEL",
@@ -458,14 +425,6 @@ if __name__ == '__main__':
         + " of other software, use this option for the"
         + " output files to be labeled accordingly.")
 
-    # Optionally, marginalize data to obtain only a pair of pops.
-    parser_optim.add_argument(
-        "--pop-lab", required=False, nargs="+",
-        metavar="ID", type=str, default=None,
-        help="Population labels (matching those provided in the positional"
-        + " argument). Only used to isolate a pair of pops. when there are"
-        + " more than 2 polymorphism data files (ie. positional args);"
-        + " otherwise not required. Make sure exactly 2 labels are provided.")
     # Prefix of the output file (followed by model and manual exec.).
     parser_optim.add_argument(
         "--out-prefix", required=False, metavar="FOUT", type=str, default=None,
