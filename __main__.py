@@ -132,10 +132,13 @@ def write_sfs(pop_labels, moments_sfs):
 
 def plot_sfs(pop_labels, moments_sfs):
     if len(pop_labels) == 1:
+        moments_sfs.mask_corners()
         outname = "onedim." + ".".join(pop_labels) + ".sfs.png"
         fig, ax = plt.subplots(1, 1, figsize=(8, 4))
         ax.plot(moments_sfs, label=pop_labels)
-        plt.legend()
+        ax.legend()
+        ax.set_xlim(left=1)
+        ax.set_xticks(list(ax.get_xticks())[1:] + [1])
     elif len(pop_labels) == 2:
         outname = "bidim." + ".".join(pop_labels) + ".sfs.png"
         fig, ax = plt.subplots(1, 1, figsize=(8, 4))
@@ -289,8 +292,23 @@ def sfs_summary(sfs: moments.Spectrum):
         "· Sum of sites (including monomorph.) in the SFS: "
         + f"{np.around(sfs.sum(), 2)}.",
         f"· Sum of segregating sites: {np.around(sfs.S())}.",
-        f"· The Fst between pops: {sfs.Fst()}.",
     ])
+    # Summary stats only defined in 1D.
+    if len(sfs.pop_ids) == 1:
+        summary.append(f"· The Fst between pops: nan.")
+        summary.append(f"· Diversity: {sfs.pi()}")
+        summary.append(f"· Watterson's theta: {sfs.Watterson_theta()}")
+    elif len(sfs.pop_ids) > 1:
+        summary.append(f"· The Fst between pops: {sfs.Fst()}.")
+        summary.append(f"· Diversity: nan.")
+        summary.append(f"· Watterson's theta: nan.")
+    # Add a citation.
+    summary.append("")
+    summary.append(
+        "See"
+        + " <https://momentsld.github.io/moments/sfs/sfs.html#computing-summary-statistics>"
+    )
+
     # Join lines in the list with newline characters.
     summary = "\n".join(summary)
 
