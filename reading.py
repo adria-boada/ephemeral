@@ -381,6 +381,7 @@ class ParserGenData:
         cur.execute(command_insert_sqlite, first_row)
         # Add the data of the rest of the generator.
         for row in generator:
+            logger.debug(row)
             cur.execute(command_insert_sqlite, row)
         # Commit these INSERT changes.
         con.commit()
