@@ -13,8 +13,8 @@ population variables which fit these SFS.
 import os.path
 import logging
 
-import moments
-import numpy as np
+import moments, numpy as np
+from threadpoolctl import threadpool_limits
 import matplotlib.pyplot as plt
 
 from . import reading, predefined_models as predef, Optimize_Functions
@@ -242,29 +242,32 @@ def func_optim(args):
         print("· Performing a single run with ID/number " +
               "'{}'.".format(args.manual_exec_i))
     print("· Using the output file prefix '{}'".format(args.out_prefix))
+    print(f"· Using, at most, {args.threads} thread(s) with 'numpy.dot'.")
 
     # Mask the corners; does it speed up computation? Is it necessary?
     sfs.mask_corners()
 
-    # Start the algor.
-    for mod in args.fit_models:
-        for run in running:
+    # Contextually set the maximum size of thread-pools.
+    with threadpool_limits(limits=int(args.threads)):
+        # Start the algor.
+        for mod in args.fit_models:
+            for run in running:
 
-            Optimize_Functions.Optimize_Routine(
-                fs=sfs,
-                outfile=str(args.out_prefix) + f"_Exec{run}",
-                model_name=str(mod),
-                func=predef.models[mod]["func"],
-                rounds=int(args.rounds),
-                param_number=int(predef.models[mod]["param"]),
-                fs_folded=sfs.folded,
-                reps=args.replicates,
-                maxiters=args.max_iters,
-                folds=args.fold_algor,
-                param_labels=predef.models[mod]["labels"],
-                in_upper=predef.models[mod]["upper"],
-                in_lower=predef.models[mod]["lower"],
-            )
+                Optimize_Functions.Optimize_Routine(
+                    fs=sfs,
+                    outfile=str(args.out_prefix) + f"_Exec{run}",
+                    model_name=str(mod),
+                    func=predef.models[mod]["func"],
+                    rounds=int(args.rounds),
+                    param_number=int(predef.models[mod]["param"]),
+                    fs_folded=sfs.folded,
+                    reps=args.replicates,
+                    maxiters=args.max_iters,
+                    folds=args.fold_algor,
+                    param_labels=predef.models[mod]["labels"],
+                    in_upper=predef.models[mod]["upper"],
+                    in_lower=predef.models[mod]["lower"],
+                )
 
     return None
 
@@ -439,7 +442,10 @@ if __name__ == '__main__':
         "--fold-algor", required=False, type=int, nargs="+", default=None,
         help="The perturbation of the starting parameters; must be a list"
         + " of ints of length 'ROUNDS' (default: from 'ROUNDS' to '1').")
-
+    parser_optim.add_argument(
+        "-t", "--threads", required=False, type=int, default=1,
+        help="Upper bound of threads allowed to be used by `numpy.dot()`"
+        + " (default: at most, use only 1 thread).")
 
 
     # To call a value, use `args.value` or `args.filename`.
