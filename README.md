@@ -1,29 +1,30 @@
 
 # ephemeral
 
-Cal instal·lar el mòdul `moments-popgen`.
+Crear _«virtual environment»_ amb els mòduls necessaris.
 
 ```sh
 # Crea un directori per a «virtual environments».
 mkdir -p ~/.venvs_python/
 cd ~/.venvs_python/
-# Crea'l.
 python3 -m venv moments-popgen
-# Activa'l i instal·la els paquets necessaris.
+# Activa el «v. env» i instal·la els paquets necessaris.
 source ~/.venvs_python/moments-popgen/bin/activate
-pip install moments-popgen matplotlib
+pip install moments-popgen matplotlib threadpoolctl
 
 # Recorda activar l'ambient virtual "moments-popgen" abans d'utilitzar aquest paquet.
 
 # Per utilitzar un dels ShellScripts, també cal la següent variable...
+# (copiar a .bashrc per fer la variable permanent).
 export MOMENTS_VIRTUAL_ENV_ACTIVATE="$HOME/.venvs_python/moments-popgen/bin/activate"
 ```
 
-Per poder cridar al mòdul des de qualsevol «current working directory», cal ajustar
-l'«environment variable» `PYTHONPATH`.
+Per poder cridar al mòdul des de qualsevol _«current working directory»_, cal ajustar
+l'_«environment variable»_ `PYTHONPATH`.
 
 ```sh
-# Folder where 'ephemeral' is cloned. Could be copied to bashrc.
+# Directori on 'ephemeral' s'ha clonat.
+# (copiar a .bashrc per fer la variable permanent).
 export PYTHONPATH="$PYTHONPATH:/home/user/folder"
 ```
 
@@ -35,6 +36,6 @@ python3 -m ephemeral
 python3 -m ephemeral toSFS -h
 
 # També es pot córrer en 'batches' a través d'un shellscript.
-qsub ShellScripts/hercules_moments_pipe.sh
+qsub -t $NUM_EXECUCIONS_INDEP ShellScripts/sge_moments_pipe.sh
 ```
 
