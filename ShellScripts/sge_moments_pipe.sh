@@ -81,7 +81,7 @@ fi
 # Es necessita especificar (exportar) les següents variables estàtiques
 # a un arxiu separat. Podria ser .bashrc o un arxiu tmp (i llavors se'n fa
 # 'source' cada vegada que es vulgui còrrer aquest guió).
-if [ ! -z "$MOMENTS_VIRTUAL_ENV_ACTIVATE" ] ; then
+if [ -z "$MOMENTS_VIRTUAL_ENV_ACTIVATE" ] ; then
 	msg="Please, export a variable with the command that activates"
 	msg="$msg the python environment with the 'moments' module. The var."
 	msg="$msg should be called 'MOMENTS_VIRTUAL_ENV_ACTIVATE'."
