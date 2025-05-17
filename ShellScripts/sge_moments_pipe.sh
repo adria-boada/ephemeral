@@ -82,9 +82,11 @@ fi
 # a un arxiu separat. Podria ser .bashrc o un arxiu tmp (i llavors se'n fa
 # 'source' cada vegada que es vulgui còrrer aquest guió).
 if [ ! -f "$MOMENTS_VIRTUAL_ENV_ACTIVATE" ] ; then
-	msg="Please, export an environment variable with the location of"
-	msg="$msg the 'activate' shellscript of 'moments' module. The var."
+	msg="Please, export a variable with the command that activates"
+	msg="$msg the python environment with the 'moments' module. The var."
 	msg="$msg should be called 'MOMENTS_VIRTUAL_ENV_ACTIVATE'."
+	msg="$msg E.g. 'source $HOME/.venvs_python/moments/bin/activate'"
+	msg="$msg or 'conda activate moments'."
 	error "$msg" 2
 fi
 # Try to find if the module 'ephemeral' is reachable with 'import':
@@ -108,7 +110,8 @@ debug "L'arxiu SFS d'entrada és '$arxiu_sfs'"
 
 
 
-source "$MOMENTS_VIRTUAL_ENV_ACTIVATE"
+# Activate 'moments' virtual env.
+"$MOMENTS_VIRTUAL_ENV_ACTIVATE"
 debug "Llançant guió d'optimizació de Python..."
 
 python3 -m ephemeral optim "$arxiu_sfs" \
