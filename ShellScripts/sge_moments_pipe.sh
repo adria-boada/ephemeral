@@ -16,8 +16,8 @@ error() {
 	exit "$2"
 }
 
-# Funció que s'utilitzarà per enviar informació detallada,
-# per tal de diagnosticar problemes.
+# Funció que s'utilitzarà per enviar informació detallada, per tal de
+# diagnosticar problemes.
 debug() {
 	[ $debug -eq 0 ] && echo "DEBUG:SGE_TASK_""$SGE_TASK_ID"":""$@" >&2
 }
@@ -30,13 +30,14 @@ retorna_instruccions() {
 	printf "\t%s\n" "--model: model requested for optimization."
 	printf "\t%s\n" "$(echo "--model:" | tr "[:print:]" " ") See available models by running the module 'ephemeral optim --fit h' or in the script 'predefined_models.py'."
 	printf "\t%s\n" "--sfs: the output SFS obtained from 'ephemeral toSFS'."
+	printf "\t%s\n" "-o: a prefix that will be combined with the 'model' string to create an output directory."
 	printf "\t%s\n" "--debug: print additional, detailed information helpful for diagnosing problems."
 	exit 2
 }
 
 # Paràmetres
 # ----------
- 
+
 # Variables predeterminades.
 debug=1  # desactiva debug.
 
@@ -67,6 +68,8 @@ if [[ ! "$SGE_TASK_ID" =~ ^[0-9]+$ ]] ; then
 	msg="$msg option '-t')."
 	error "$msg" 2
 # Revisa que l'arxiu SFS existeix.
+elif [ -z "$arxiu_sfs" ] ; then
+	error "Please provide '-s SFS'." 2
 elif [ ! -f "$arxiu_sfs" ] ; then
 	error "The provided file '$arxiu_sfs' does not exist." 2
 elif [ -z "$outfold" ] ; then
@@ -86,9 +89,8 @@ if [ ! -f "$MOMENTS_VIRTUAL_ENV_ACTIVATE" ] ; then
 fi
 # Try to find if the module 'ephemeral' is reachable with 'import':
 python3 -c 'import ephemeral' 2> /dev/null || {
-	msg="Please, update 'PYTHONPATH' environment variable to include"
-	msg="$msg the 'moments' optimization script named 'ephemeral'"
-	msg="$msg (and export it)."
+	msg="Please, update the environment variable 'PYTHONPATH' so it includes"
+	msg="$msg the path to 'ephemeral' folder and export the variable."
 	error "$msg" 2
 }
 
