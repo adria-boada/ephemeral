@@ -1,0 +1,16 @@
+[project]
+name = "ephemeral_adria-boada"
+version = "0.0.3"
+authors = [
+	{ name = "adria-boada" }
+]
+description = "Create moments.Spectrum() from polymorphism calling data"
+readme = "README.md"
+dependencies = [
+	"moments-popgen",
+	"numpy",
+	"threadpoolctl",
+	"matplotlib",
+	]
+license = "GPL-3.0-or-later"
+license-files = ["LICEN[CS]E*"]
