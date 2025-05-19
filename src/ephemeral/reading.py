@@ -385,6 +385,7 @@ class ParserGenData:
             cur.execute(command_insert_sqlite, row)
         # Commit these INSERT changes.
         con.commit()
+        con.close()
     
         return None
 
@@ -421,7 +422,7 @@ def select_shared_loci(db_sqlite: str):
     # The selected rows with polymorphism data are stored in "res".
     db_res = cur.execute(command_intersection_sqlite)
 
-    return db_res, db_tblnames
+    return db_res, db_tblnames, con
 
 def select_median(colname: str, tblname: str, db_sqlite: str):
     """
@@ -441,6 +442,7 @@ def select_median(colname: str, tblname: str, db_sqlite: str):
         + f" OFFSET (SELECT (COUNT(*) - 1) / 2 FROM {tblname}))"
     )
     median = cur.execute(command_median)
+    con.close()
 
     # "median" is an iterable of tuples (database query); return only the first
     # item of the first tuple (a number).
@@ -459,6 +461,7 @@ def select_average(colname: str, tblname: str, db_sqlite: str):
 
     command_average = str(f"SELECT AVG({colname}) FROM {tblname}")
     average = cur.execute(command_average)
+    con.close()
 
     # "average" is an iterable of tuples (database query); return only the first
     # item of the first tuple (a number).
@@ -483,6 +486,7 @@ def select_average_expected_heterozygosity(tblname: str, db_sqlite: str,
                 + f"SELECT {colname_minfreq} AS x FROM {tblname}))"
     )
     avg_exp_hetero = cur.execute(command_average_expected_heterozygosity)
+    con.close()
 
     # "avg_exp_hetero" is an iterable of tuples (database query); return only
     # the first item of the first tuple (a number).
@@ -742,7 +746,7 @@ def main(finputs: list, pop_labels:list, nchroms: list,
     logger.info("Executing the inner join of the database with the columns"
           + " 'chromosome' and 'pos' (finding sites shared across"
           + " all of the given files).")
-    db_res, db_tblnames = select_shared_loci(temp_file.name)
+    db_res, db_tblnames, con = select_shared_loci(temp_file.name)
 
     # Remove the "intersect_tblname" from "db_tblnames".
     if intersect_sites:
@@ -784,6 +788,8 @@ def main(finputs: list, pop_labels:list, nchroms: list,
         # of ALL files is an empty set.
         raise ValueError("The intersection of ALL files is an empty set;"
                          + " there are no shared sites across all files.")
+
+    con.close()
 
     # Finally, add the remaining sites in "moments_dd" if the amount of sites
     # was not exactly modulo 100 000:
